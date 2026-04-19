@@ -1,0 +1,146 @@
+{
+    "name": "codearchy",
+    "displayName": "CodeArchy",
+    "description": "Offline-first VS Code extension to visualize codebases as high-level architectural structures using Tree-sitter parsing and local AI inference.",
+    "version": "0.1.0",
+    "publisher": "codearchy",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/iyinusa/codearchy"
+    },
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "categories": [
+        "Visualization",
+        "Other"
+    ],
+    "keywords": [
+        "architecture",
+        "visualization",
+        "dependency-graph",
+        "code-analysis",
+        "tree-sitter"
+    ],
+    "activationEvents": [],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "codearchy.showArchitecture",
+                "title": "CodeArchy: Show Architecture View",
+                "icon": "$(graph)"
+            },
+            {
+                "command": "codearchy.analyzeWorkspace",
+                "title": "CodeArchy: Analyze Workspace"
+            },
+            {
+                "command": "codearchy.refreshView",
+                "title": "CodeArchy: Refresh Architecture View",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "codearchy.exportSVG",
+                "title": "CodeArchy: Export as SVG"
+            },
+            {
+                "command": "codearchy.exportPNG",
+                "title": "CodeArchy: Export as PNG"
+            }
+        ],
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "codearch-explorer",
+                    "title": "CodeArchy",
+                    "icon": "media/icon.svg"
+                }
+            ]
+        },
+        "views": {
+            "codearch-explorer": [
+                {
+                    "id": "codearchy.modulesView",
+                    "name": "Modules"
+                }
+            ]
+        },
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "codearchy.showArchitecture",
+                    "group": "navigation"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "CodeArchy",
+            "properties": {
+                "codearchy.includedLanguages": {
+                    "type": "array",
+                    "default": [
+                        "typescript",
+                        "javascript",
+                        "python",
+                        "java",
+                        "go",
+                        "rust"
+                    ],
+                    "description": "Languages to include in architecture analysis."
+                },
+                "codearchy.excludePatterns": {
+                    "type": "array",
+                    "default": [
+                        "**/node_modules/**",
+                        "**/dist/**",
+                        "**/out/**",
+                        "**/.git/**",
+                        "**/vendor/**",
+                        "**/build/**"
+                    ],
+                    "description": "Glob patterns to exclude from analysis."
+                },
+                "codearchy.maxFileSize": {
+                    "type": "number",
+                    "default": 500000,
+                    "description": "Maximum file size in bytes to analyze."
+                },
+                "codearchy.aiModel": {
+                    "type": "string",
+                    "enum": [
+                        "gemma-e2b",
+                        "gemma-e4b",
+                        "none"
+                    ],
+                    "default": "none",
+                    "description": "Local AI model for architecture inference. 'none' uses heuristic grouping."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run build:webview && npm run compile",
+        "build:webview": "cd webview-ui && npm install && npm run build",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "download-grammars": "node scripts/download-grammars.js",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js",
+        "package": "vsce package",
+        "pretest": "npm run compile"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.0",
+        "@types/vscode": "^1.85.0",
+        "@typescript-eslint/eslint-plugin": "^7.0.0",
+        "@typescript-eslint/parser": "^7.0.0",
+        "eslint": "^8.56.0",
+        "typescript": "^5.3.0",
+        "@vscode/vsce": "^2.22.0"
+    },
+    "dependencies": {
+        "web-tree-sitter": "^0.22.0"
+    }
+}
