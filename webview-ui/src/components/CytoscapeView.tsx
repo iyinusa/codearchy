@@ -121,6 +121,36 @@ export function CytoscapeView({
         }
     }, [selectedNodeId]);
 
+    // Handle node selection focus (fade non-connected nodes/edges)
+    useEffect(() => {
+        const cy = cyRef.current;
+        if (!cy) return;
+
+        cy.nodes('[type="module"]').removeClass('focus-dimmed');
+        cy.edges().removeClass('focus-dimmed focus-active');
+
+        if (selectedNodeId) {
+            const connectedNodeIds = new Set([selectedNodeId]);
+            graph.edges.forEach(edge => {
+                if (edge.source === selectedNodeId) connectedNodeIds.add(edge.target);
+                if (edge.target === selectedNodeId) connectedNodeIds.add(edge.source);
+            });
+
+            cy.nodes('[type="module"]').forEach(node => {
+                if (!connectedNodeIds.has(node.id())) {
+                    node.addClass('focus-dimmed');
+                }
+            });
+
+            cy.edges().forEach(edge => {
+                const isConnected =
+                    edge.source().id() === selectedNodeId ||
+                    edge.target().id() === selectedNodeId;
+                edge.addClass(isConnected ? 'focus-active' : 'focus-dimmed');
+            });
+        }
+    }, [selectedNodeId, graph]);
+
     // Handle subsystem highlighting
     useEffect(() => {
         const cy = cyRef.current;
@@ -262,9 +292,9 @@ function getCytoscapeStyle(): cytoscape.StylesheetStyle[] {
             },
         },
         {
-            selector: 'node.dimmed, node.search-dimmed',
+            selector: 'node.dimmed, node.search-dimmed, node.focus-dimmed',
             style: {
-                opacity: 0.15,
+                opacity: 0.12,
             },
         },
         {
@@ -280,9 +310,18 @@ function getCytoscapeStyle(): cytoscape.StylesheetStyle[] {
             },
         },
         {
-            selector: 'edge.dimmed',
+            selector: 'edge.dimmed, edge.focus-dimmed',
             style: {
-                opacity: 0.08,
+                opacity: 0.06,
+            },
+        },
+        {
+            selector: 'edge.focus-active',
+            style: {
+                'line-color': '#007acc',
+                'target-arrow-color': '#007acc',
+                opacity: 0.9,
+                width: 2,
             },
         },
     ];

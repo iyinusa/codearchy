@@ -1,8 +1,8 @@
 # CodeArchy
 
-**Offline-first VS Code extension that visualizes your codebase as a high-level architecture diagram.**
+**Offline-first privacy VS Code extension that visualizes your codebase as a high-level architecture diagram.**
 
-CodeArchy parses your source code, builds a dependency graph, groups modules into logical subsystems, and renders an interactive architecture view — all locally, with no cloud dependency.
+CodeArchy is an open-source offline-first privacy AI system that turns codebases into explainable system architecture for education, onboarding, and safer software development/maintenance.
 
 ![License](https://img.shields.io/badge/license-MIT-green) ![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat&logo=typescript&logoColor=white) ![React](https://img.shields.io/badge/React-20232A?style=flat&logo=react&logoColor=61DAFB) ![Visual Studio Code](https://img.shields.io/badge/VS%20Code-007ACC?style=flat&logo=visual-studio-code&logoColor=white) ![Tree-sitter](https://img.shields.io/badge/Tree--sitter-Parsing-blueviolet) ![React Flow](https://img.shields.io/badge/React%20Flow-UI-ff007f) ![Gemma 4](https://img.shields.io/badge/Gemma%204-AI%20Inference-ff69b4)
 

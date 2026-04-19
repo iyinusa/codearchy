@@ -25,6 +25,7 @@ interface ReactFlowViewProps {
     searchTerm: string;
     onNodeSelect: (nodeId: string | null) => void;
     onNavigateToFile: (filePath: string, line?: number) => void;
+    showMiniMap: boolean;
 }
 
 // Custom node component for architecture modules
@@ -86,10 +87,11 @@ export function ReactFlowView({
     searchTerm,
     onNodeSelect,
     onNavigateToFile,
+    showMiniMap,
 }: ReactFlowViewProps) {
     const { flowNodes, flowEdges } = useMemo(() => {
-        return buildFlowElements(graph, highlightedSubsystem, searchTerm);
-    }, [graph, highlightedSubsystem, searchTerm]);
+        return buildFlowElements(graph, highlightedSubsystem, searchTerm, selectedNodeId);
+    }, [graph, highlightedSubsystem, searchTerm, selectedNodeId]);
 
     const [nodes, setNodes, onNodesChange] = useNodesState(flowNodes);
     const [edges, setEdges, onEdgesChange] = useEdgesState(flowEdges);
@@ -148,14 +150,16 @@ export function ReactFlowView({
             >
                 <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--border)" />
                 <Controls showInteractive={false} />
-                <MiniMap
-                    nodeColor={(node) => {
-                        const data = node.data as { subsystemColor?: string };
-                        return data.subsystemColor || '#666';
-                    }}
-                    maskColor="rgba(0, 0, 0, 0.6)"
-                    style={{ background: 'var(--sidebar-bg)' }}
-                />
+                {showMiniMap && (
+                    <MiniMap
+                        nodeColor={(node) => {
+                            const data = node.data as { subsystemColor?: string; dimmed?: boolean };
+                            return data.dimmed ? '#333' : (data.subsystemColor || '#666');
+                        }}
+                        maskColor="rgba(0, 0, 0, 0.6)"
+                        style={{ background: 'var(--sidebar-bg)' }}
+                    />
+                )}
             </ReactFlow>
         </div>
     );
@@ -164,8 +168,19 @@ export function ReactFlowView({
 function buildFlowElements(
     graph: ArchitectureGraph,
     highlightedSubsystem: string | null,
-    searchTerm: string
+    searchTerm: string,
+    selectedNodeId: string | null
 ): { flowNodes: Node[]; flowEdges: Edge[] } {
+    // Pre-compute connected nodes for focus/fade
+    const connectedNodeIds = new Set<string>();
+    if (selectedNodeId) {
+        connectedNodeIds.add(selectedNodeId);
+        for (const edge of graph.edges) {
+            if (edge.source === selectedNodeId) connectedNodeIds.add(edge.target);
+            if (edge.target === selectedNodeId) connectedNodeIds.add(edge.source);
+        }
+    }
+
     const flowNodes: Node[] = [];
     const flowEdges: Edge[] = [];
 
@@ -217,7 +232,7 @@ function buildFlowElements(
             const col = i % innerCols;
             const row = Math.floor(i / innerCols);
 
-            const isDimmed = getDimmedState(node, highlightedSubsystem, searchTerm, graph);
+            const isDimmed = getDimmedState(node, highlightedSubsystem, searchTerm, graph, selectedNodeId, connectedNodeIds);
 
             flowNodes.push({
                 id: node.id,
@@ -242,22 +257,32 @@ function buildFlowElements(
 
     // Build edges
     for (const edge of graph.edges) {
-        const isHighlighted = !!(
-            highlightedSubsystem === null ||
-            graph.subsystems.find(s => s.id === highlightedSubsystem)?.nodeIds.includes(edge.source) ||
-            graph.subsystems.find(s => s.id === highlightedSubsystem)?.nodeIds.includes(edge.target)
-        );
+        const isConnectedToSelected = selectedNodeId
+            ? (edge.source === selectedNodeId || edge.target === selectedNodeId)
+            : null;
+
+        const isHighlighted = selectedNodeId
+            ? isConnectedToSelected!
+            : !!(
+                highlightedSubsystem === null ||
+                graph.subsystems.find(s => s.id === highlightedSubsystem)?.nodeIds.includes(edge.source) ||
+                graph.subsystems.find(s => s.id === highlightedSubsystem)?.nodeIds.includes(edge.target)
+            );
+
+        const edgeOpacity = selectedNodeId
+            ? (isConnectedToSelected ? 0.9 : 0.08)
+            : (isHighlighted ? 0.8 : 0.3);
 
         flowEdges.push({
             id: edge.id,
             source: edge.source,
             target: edge.target,
             type: 'smoothstep',
-            animated: false,
+            animated: selectedNodeId ? !!isConnectedToSelected : false,
             style: {
                 stroke: isHighlighted ? 'var(--accent)' : 'var(--border)',
                 strokeWidth: isHighlighted ? 2 : 1,
-                opacity: isHighlighted ? 0.8 : 0.3,
+                opacity: edgeOpacity,
             },
             markerEnd: {
                 type: MarkerType.ArrowClosed,
@@ -275,8 +300,13 @@ function getDimmedState(
     node: GraphNode,
     highlightedSubsystem: string | null,
     searchTerm: string,
-    graph: ArchitectureGraph
+    graph: ArchitectureGraph,
+    selectedNodeId: string | null,
+    connectedNodeIds: Set<string>
 ): boolean {
+    if (selectedNodeId) {
+        return !connectedNodeIds.has(node.id);
+    }
     if (searchTerm) {
         return !node.id.toLowerCase().includes(searchTerm.toLowerCase());
     }

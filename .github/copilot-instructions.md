@@ -3,7 +3,7 @@
 Welcome to the **CodeArchy** project! This file provides context, architectural guidelines, and coding standards for AI coding assistants (like GitHub Copilot) working on this repository.
 
 ## Project Overview
-**CodeArchy** is an open-source, offline-first VS Code Extension designed to visualize codebases as high-level architectural structures. It parses local code, generates dependency graphs, and uses local AI inference to interpret and group subsystems intelligently.
+**CodeArchy** is an open-source, offline-first privacy VS Code Extension designed to visualize codebases as high-level architectural structures for education, onboarding, and safer software development/maintenance. It parses local code, generates dependency graphs, and uses local AI inference to interpret and group subsystems intelligently.
 
 ## Tech Stack & Architecture
 When writing code or suggesting architecture for CodeArchy, adhere to the following core stack:

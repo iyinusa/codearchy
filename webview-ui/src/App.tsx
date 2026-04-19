@@ -13,6 +13,7 @@ export function App() {
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [highlightedSubsystem, setHighlightedSubsystem] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [showMiniMap, setShowMiniMap] = useState(true);
     const mainContentRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -114,6 +115,8 @@ export function App() {
                     onRefresh={handleRefresh}
                     onExportSVG={handleExportSVG}
                     onExportPNG={handleExportPNG}
+                    showMiniMap={showMiniMap}
+                    onToggleMiniMap={() => setShowMiniMap(v => !v)}
                 />
                 {!graph ? (
                     <div className="loading">
@@ -128,6 +131,7 @@ export function App() {
                         searchTerm={searchTerm}
                         onNodeSelect={handleNodeSelect}
                         onNavigateToFile={handleNavigateToFile}
+                        showMiniMap={showMiniMap}
                     />
                 ) : (
                     <CytoscapeView

@@ -7,6 +7,8 @@ interface ToolbarProps {
     onRefresh: () => void;
     onExportSVG: () => void;
     onExportPNG: () => void;
+    showMiniMap: boolean;
+    onToggleMiniMap: () => void;
 }
 
 export function Toolbar({
@@ -15,6 +17,8 @@ export function Toolbar({
     onRefresh,
     onExportSVG,
     onExportPNG,
+    showMiniMap,
+    onToggleMiniMap,
 }: ToolbarProps) {
     return (
         <div className="toolbar">
@@ -32,6 +36,15 @@ export function Toolbar({
                     title="Cytoscape Dense View"
                 >
                     ◉ Dense
+                </button>
+            </div>
+            <div className="toolbar-group">
+                <button
+                    className={`toolbar-btn ${showMiniMap ? 'active' : ''}`}
+                    onClick={onToggleMiniMap}
+                    title={showMiniMap ? 'Hide Mini Map' : 'Show Mini Map'}
+                >
+                    ⧉ Map
                 </button>
             </div>
             <div className="toolbar-group">
