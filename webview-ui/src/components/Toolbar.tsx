@@ -9,6 +9,10 @@ interface ToolbarProps {
     onExportPNG: () => void;
     showMiniMap: boolean;
     onToggleMiniMap: () => void;
+    onOpenModelSelector: () => void;
+    hasSystemArch: boolean;
+    isGeneratingArch: boolean;
+    onGenerateSystemArch: () => void;
 }
 
 export function Toolbar({
@@ -19,10 +23,22 @@ export function Toolbar({
     onExportPNG,
     showMiniMap,
     onToggleMiniMap,
+    onOpenModelSelector,
+    hasSystemArch,
+    isGeneratingArch,
+    onGenerateSystemArch,
 }: ToolbarProps) {
     return (
         <div className="toolbar">
             <div className="toolbar-group">
+                <button
+                    className={`toolbar-btn ${viewMode === 'system' ? 'active' : ''}`}
+                    onClick={() => onViewModeChange('system')}
+                    title="AI System Architecture View"
+                    disabled={!hasSystemArch && !isGeneratingArch}
+                >
+                    🏗 System
+                </button>
                 <button
                     className={`toolbar-btn ${viewMode === 'reactflow' ? 'active' : ''}`}
                     onClick={() => onViewModeChange('reactflow')}
@@ -36,6 +52,27 @@ export function Toolbar({
                     title="Cytoscape Dense View"
                 >
                     ◉ Dense
+                </button>
+            </div>
+            <div className="toolbar-group">
+                <button
+                    className={`toolbar-btn toolbar-ai-btn ${isGeneratingArch ? 'generating' : ''}`}
+                    onClick={onGenerateSystemArch}
+                    disabled={isGeneratingArch}
+                    title={isGeneratingArch ? 'Generating architecture...' : 'Generate AI System Architecture'}
+                >
+                    {isGeneratingArch ? (
+                        <><span className="btn-spinner" /> Analyzing...</>
+                    ) : (
+                        '✦ AI Analyze'
+                    )}
+                </button>
+                <button
+                    className="toolbar-btn"
+                    onClick={onOpenModelSelector}
+                    title="AI Model Settings"
+                >
+                    ⚙ Model
                 </button>
             </div>
             <div className="toolbar-group">

@@ -110,6 +110,18 @@ export enum WebviewMessageType {
     ExportPNG = 'exportPNG',
     ExportResult = 'exportResult',
     SwitchView = 'switchView',
+    // AI Model & System Architecture
+    RequestModelStatus = 'requestModelStatus',
+    ModelStatus = 'modelStatus',
+    SelectModel = 'selectModel',
+    GenerateSystemArch = 'generateSystemArch',
+    SystemArchData = 'systemArchData',
+    SystemArchProgress = 'systemArchProgress',
+    // Chat / Conversation
+    ChatMessage = 'chatMessage',
+    ChatResponse = 'chatResponse',
+    ChatChunk = 'chatChunk',
+    ClearChat = 'clearChat',
 }
 
 export interface AnalysisProgress {

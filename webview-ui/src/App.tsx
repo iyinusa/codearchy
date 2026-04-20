@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ArchitectureGraph, ViewMode } from './types';
+import { ArchitectureGraph, ViewMode, SystemArchitecture } from './types';
 import { postMessage } from './vscode';
 import { ReactFlowView } from './components/ReactFlowView';
 import { CytoscapeView } from './components/CytoscapeView';
+import { SystemView } from './components/SystemView';
 import { Sidebar } from './components/Sidebar';
 import { DetailPanel } from './components/DetailPanel';
 import { Toolbar } from './components/Toolbar';
+import { ModelSelector } from './components/ModelSelector';
+import { ChatPanel } from './components/ChatPanel';
 
 export function App() {
     const [graph, setGraph] = useState<ArchitectureGraph | null>(null);
@@ -14,6 +17,11 @@ export function App() {
     const [highlightedSubsystem, setHighlightedSubsystem] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [showMiniMap, setShowMiniMap] = useState(true);
+    const [showModelSelector, setShowModelSelector] = useState(false);
+    const [systemArch, setSystemArch] = useState<SystemArchitecture | null>(null);
+    const [isGeneratingArch, setIsGeneratingArch] = useState(false);
+    const [archProgress, setArchProgress] = useState<string>('');
+    const [chatOpen, setChatOpen] = useState(false);
     const mainContentRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -29,6 +37,27 @@ export function App() {
                 case 'exportPNG':
                     exportAsPNG();
                     break;
+                case 'systemArchData': {
+                    const arch = message.payload as SystemArchitecture;
+                    setSystemArch(arch);
+                    setIsGeneratingArch(false);
+                    setArchProgress('');
+                    setViewMode('system');
+                    break;
+                }
+                case 'systemArchProgress': {
+                    const prog = message.payload as { message: string };
+                    setArchProgress(prog.message);
+                    break;
+                }
+                case 'error': {
+                    const err = message.payload as { message: string };
+                    setIsGeneratingArch(false);
+                    setArchProgress('');
+                    // Error shown via chat or inline
+                    console.error('CodeArchy error:', err.message);
+                    break;
+                }
             }
         };
         window.addEventListener('message', handler);
@@ -37,10 +66,8 @@ export function App() {
     }, []);
 
     const exportAsSVG = useCallback(() => {
-        // Generate SVG from current view
         const container = mainContentRef.current;
         if (!container || !graph) return;
-
         const svgContent = generateArchitectureSVG(graph);
         postMessage('exportResult', { format: 'svg', data: svgContent, mimeType: 'image/svg+xml' });
     }, [graph]);
@@ -48,15 +75,13 @@ export function App() {
     const exportAsPNG = useCallback(() => {
         const container = mainContentRef.current;
         if (!container || !graph) return;
-
         const svgContent = generateArchitectureSVG(graph);
-        // Convert SVG to PNG via canvas
         const img = new Image();
         const svgBlob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8' });
         const url = URL.createObjectURL(svgBlob);
         img.onload = () => {
             const canvas = document.createElement('canvas');
-            const scale = 2; // High DPI
+            const scale = 2;
             canvas.width = img.width * scale;
             canvas.height = img.height * scale;
             const ctx = canvas.getContext('2d');
@@ -89,13 +114,15 @@ export function App() {
         postMessage('refreshRequest');
     }, []);
 
-    const handleExportSVG = useCallback(() => {
-        exportAsSVG();
-    }, [exportAsSVG]);
+    const handleExportSVG = useCallback(() => { exportAsSVG(); }, [exportAsSVG]);
+    const handleExportPNG = useCallback(() => { exportAsPNG(); }, [exportAsPNG]);
 
-    const handleExportPNG = useCallback(() => {
-        exportAsPNG();
-    }, [exportAsPNG]);
+    const handleGenerateSystemArch = useCallback(() => {
+        if (isGeneratingArch) return;
+        setIsGeneratingArch(true);
+        setArchProgress('Preparing architecture analysis...');
+        postMessage('generateSystemArch');
+    }, [isGeneratingArch]);
 
     const selectedNode = graph?.nodes.find(n => n.id === selectedNodeId) ?? null;
 
@@ -117,12 +144,39 @@ export function App() {
                     onExportPNG={handleExportPNG}
                     showMiniMap={showMiniMap}
                     onToggleMiniMap={() => setShowMiniMap(v => !v)}
+                    onOpenModelSelector={() => setShowModelSelector(true)}
+                    hasSystemArch={!!systemArch}
+                    isGeneratingArch={isGeneratingArch}
+                    onGenerateSystemArch={handleGenerateSystemArch}
                 />
                 {!graph ? (
                     <div className="loading">
                         <div className="spinner" />
                         Waiting for analysis data...
                     </div>
+                ) : viewMode === 'system' ? (
+                    systemArch ? (
+                        <SystemView architecture={systemArch} showMiniMap={showMiniMap} />
+                    ) : isGeneratingArch ? (
+                        <div className="loading">
+                            <div className="spinner" />
+                            <div className="loading-text">
+                                <strong>Generating System Architecture</strong>
+                                <span className="loading-sub">{archProgress}</span>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="loading">
+                            <div className="system-empty">
+                                <div className="system-empty-icon">🏗</div>
+                                <h3>System Architecture</h3>
+                                <p>Click <strong>"✦ AI Analyze"</strong> to generate a high-level system architecture using Gemma 4.</p>
+                                <button className="btn-generate" onClick={handleGenerateSystemArch}>
+                                    ✦ Generate System Architecture
+                                </button>
+                            </div>
+                        </div>
+                    )
                 ) : viewMode === 'reactflow' ? (
                     <ReactFlowView
                         graph={graph}
@@ -151,6 +205,14 @@ export function App() {
                     />
                 )}
             </div>
+
+            {/* Chat Panel */}
+            <ChatPanel isOpen={chatOpen} onToggle={() => setChatOpen(v => !v)} />
+
+            {/* Model Selector Modal */}
+            {showModelSelector && (
+                <ModelSelector onClose={() => setShowModelSelector(false)} />
+            )}
         </div>
     );
 }

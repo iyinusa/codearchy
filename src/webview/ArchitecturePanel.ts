@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ArchitectureGraph, WebviewMessage, WebviewMessageType } from '../types';
+import { OllamaService, MODEL_OPTIONS, SystemArchitecture } from '../inference/OllamaService';
 
 export class ArchitecturePanel {
   private static instance: ArchitecturePanel | undefined;
@@ -9,10 +10,20 @@ export class ArchitecturePanel {
   private readonly extensionUri: vscode.Uri;
   private disposables: vscode.Disposable[] = [];
   private currentGraph: ArchitectureGraph | undefined;
+  private ollamaService: OllamaService;
+  private selectedModel: string | null = null;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
     this.panel = panel;
     this.extensionUri = extensionUri;
+    this.ollamaService = new OllamaService();
+
+    // Load saved model selection
+    const config = vscode.workspace.getConfiguration('codearchy');
+    const aiModel = config.get<string>('aiModel', 'none');
+    if (aiModel !== 'none') {
+      this.selectedModel = aiModel;
+    }
 
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
@@ -107,8 +118,6 @@ export class ArchitecturePanel {
 
       case WebviewMessageType.ExportSVG:
       case WebviewMessageType.ExportPNG: {
-        // The webview sends export requests; we handle them by triggering
-        // the export flow in the webview which sends back the result
         this.panel.webview.postMessage({
           type: message.type,
           payload: null,
@@ -123,7 +132,258 @@ export class ArchitecturePanel {
         }
         break;
       }
+
+      // --- AI Model Messages ---
+      case WebviewMessageType.RequestModelStatus:
+        this.handleModelStatusRequest();
+        break;
+
+      case WebviewMessageType.SelectModel: {
+        const modelPayload = message.payload as { modelId: string };
+        this.handleModelSelection(modelPayload.modelId);
+        break;
+      }
+
+      case WebviewMessageType.GenerateSystemArch:
+        this.handleGenerateSystemArch();
+        break;
+
+      // --- Chat Messages ---
+      case WebviewMessageType.ChatMessage: {
+        const chatPayload = message.payload as { content: string };
+        this.handleChatMessage(chatPayload.content);
+        break;
+      }
+
+      case WebviewMessageType.ClearChat:
+        this.ollamaService.clearConversation();
+        break;
     }
+  }
+
+  // --- AI Model Handlers ---
+
+  private async handleModelStatusRequest() {
+    try {
+      const status = await this.ollamaService.getModelStatus();
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.ModelStatus,
+        payload: {
+          ...status,
+          selectedModel: this.selectedModel,
+        },
+      });
+    } catch {
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.ModelStatus,
+        payload: {
+          ollamaRunning: false,
+          models: MODEL_OPTIONS.map((m) => ({ ...m, installed: false })),
+          selectedModel: null,
+        },
+      });
+    }
+  }
+
+  private async handleModelSelection(modelId: string) {
+    this.selectedModel = modelId;
+    // Persist to settings
+    const config = vscode.workspace.getConfiguration('codearchy');
+    await config.update('aiModel', modelId, vscode.ConfigurationTarget.Workspace);
+
+    // Send updated status
+    this.handleModelStatusRequest();
+    vscode.window.showInformationMessage(`CodeArchy: AI model set to ${modelId}`);
+  }
+
+  private async handleGenerateSystemArch() {
+    if (!this.currentGraph) {
+      this.sendError('No codebase analysis available. Run "Analyze Workspace" first.');
+      return;
+    }
+
+    const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
+    if (!modelOpt) {
+      // Try to use ollama anyway or prompt to select
+      const available = await this.ollamaService.isAvailable();
+      if (!available) {
+        this.sendError('Ollama is not running. Please start Ollama and select a model.');
+        this.panel.webview.postMessage({
+          type: WebviewMessageType.SystemArchProgress,
+          payload: { message: '' },
+        });
+        return;
+      }
+
+      // No model selected — try fallback with heuristics
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.SystemArchProgress,
+        payload: { message: 'No AI model selected. Using heuristic analysis...' },
+      });
+
+      const fallbackArch = this.buildFallbackArchitecture(this.currentGraph);
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.SystemArchData,
+        payload: fallbackArch,
+      });
+      return;
+    }
+
+    try {
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.SystemArchProgress,
+        payload: { message: `Connecting to Ollama (${modelOpt.label})...` },
+      });
+
+      const available = await this.ollamaService.isAvailable();
+      if (!available) {
+        this.sendError('Cannot connect to Ollama. Make sure it\'s running at localhost:11434.');
+        return;
+      }
+
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.SystemArchProgress,
+        payload: { message: `Analyzing codebase with ${modelOpt.label}... This may take a moment.` },
+      });
+
+      const architecture = await this.ollamaService.generateSystemArchitecture(
+        this.currentGraph,
+        modelOpt.ollamaTag,
+        (chunk) => {
+          this.panel.webview.postMessage({
+            type: WebviewMessageType.SystemArchProgress,
+            payload: { message: `Generating architecture... (streaming)` },
+          });
+        }
+      );
+
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.SystemArchData,
+        payload: architecture,
+      });
+
+      vscode.window.showInformationMessage(
+        `CodeArchy: System architecture generated — ${architecture.nodes.length} subsystems, pattern: ${architecture.pattern}`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.sendError(`Architecture generation failed: ${msg}`);
+    }
+  }
+
+  private buildFallbackArchitecture(graph: ArchitectureGraph): SystemArchitecture {
+    const COLORS = [
+      '#4FC3F7', '#81C784', '#FFB74D', '#E57373',
+      '#BA68C8', '#4DB6AC', '#FF8A65', '#90A4AE',
+    ];
+
+    const nodes = graph.subsystems.map((sub, i) => ({
+      id: sub.id,
+      label: sub.name,
+      description: sub.description,
+      type: 'subsystem' as const,
+      color: COLORS[i % COLORS.length],
+      children: sub.nodeIds,
+    }));
+
+    const subsystemMap = new Map<string, string>();
+    for (const sub of graph.subsystems) {
+      for (const nodeId of sub.nodeIds) {
+        subsystemMap.set(nodeId, sub.id);
+      }
+    }
+
+    const edgeSet = new Set<string>();
+    const edges: Array<{ id: string; source: string; target: string; label: string; type: 'dependency' }> = [];
+    for (const edge of graph.edges) {
+      const sourceSub = subsystemMap.get(edge.source);
+      const targetSub = subsystemMap.get(edge.target);
+      if (sourceSub && targetSub && sourceSub !== targetSub) {
+        const key = `${sourceSub}->${targetSub}`;
+        if (!edgeSet.has(key)) {
+          edgeSet.add(key);
+          edges.push({
+            id: `sysedge-${edges.length}`,
+            source: sourceSub,
+            target: targetSub,
+            label: 'depends on',
+            type: 'dependency',
+          });
+        }
+      }
+    }
+
+    return {
+      nodes,
+      edges,
+      pattern: 'Modular',
+      summary: `Heuristic analysis: ${graph.subsystems.length} subsystems across ${graph.metadata.fileCount} files (${graph.metadata.languages.join(', ')}).`,
+    };
+  }
+
+  // --- Chat Handler ---
+
+  private async handleChatMessage(content: string) {
+    if (!this.currentGraph) {
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.ChatResponse,
+        payload: { content: '', error: 'No codebase analysis available. Run "Analyze Workspace" first.' },
+      });
+      return;
+    }
+
+    const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
+    if (!modelOpt) {
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.ChatResponse,
+        payload: { content: '', error: 'No AI model selected. Open Model Settings to configure.' },
+      });
+      return;
+    }
+
+    try {
+      const available = await this.ollamaService.isAvailable();
+      if (!available) {
+        this.panel.webview.postMessage({
+          type: WebviewMessageType.ChatResponse,
+          payload: { content: '', error: 'Cannot connect to Ollama. Make sure it\'s running.' },
+        });
+        return;
+      }
+
+      // Set architecture context for chat
+      this.ollamaService.setArchitectureContext(this.currentGraph);
+
+      const response = await this.ollamaService.chat(
+        content,
+        modelOpt.ollamaTag,
+        (chunk) => {
+          this.panel.webview.postMessage({
+            type: WebviewMessageType.ChatChunk,
+            payload: { content: chunk },
+          });
+        }
+      );
+
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.ChatResponse,
+        payload: { content: response },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.ChatResponse,
+        payload: { content: '', error: `Chat failed: ${msg}` },
+      });
+    }
+  }
+
+  private sendError(message: string) {
+    this.panel.webview.postMessage({
+      type: WebviewMessageType.Error,
+      payload: { message },
+    });
+    vscode.window.showErrorMessage(`CodeArchy: ${message}`);
   }
 
   private async handleExportResult(result: { format: string; data: string; mimeType: string }) {
@@ -1374,5 +1634,634 @@ function getBaseStyles(): string {
       opacity: 0.7;
     }
     .dep-arrow { font-weight: bold; }
+
+    /* ===== AI Toolbar extras ===== */
+    .toolbar-ai-btn {
+      background: linear-gradient(135deg, #1a237e 0%, #4a148c 100%) !important;
+      border-color: #7c4dff !important;
+      color: #fff !important;
+    }
+    .toolbar-ai-btn:hover { opacity: 0.9; }
+    .toolbar-ai-btn.generating {
+      opacity: 0.7;
+      cursor: wait;
+    }
+    .toolbar-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .btn-spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-right: 4px;
+    }
+
+    /* ===== Loading extras ===== */
+    .loading-text {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .loading-sub {
+      font-size: 12px;
+      opacity: 0.7;
+    }
+
+    /* ===== System empty state ===== */
+    .system-empty {
+      text-align: center;
+      max-width: 400px;
+    }
+    .system-empty-icon {
+      font-size: 48px;
+      margin-bottom: 12px;
+    }
+    .system-empty h3 {
+      font-size: 18px;
+      margin-bottom: 8px;
+    }
+    .system-empty p {
+      font-size: 13px;
+      opacity: 0.7;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    .btn-generate {
+      background: linear-gradient(135deg, #1a237e 0%, #4a148c 100%);
+      border: 1px solid #7c4dff;
+      color: #fff;
+      padding: 8px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .btn-generate:hover { opacity: 0.9; }
+
+    /* ===== System View ===== */
+    .system-view-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+    }
+    .system-view-banner {
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(26, 35, 126, 0.15);
+    }
+    .system-banner-content {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+    }
+    .system-pattern-badge {
+      background: #7c4dff;
+      color: #fff;
+      padding: 2px 10px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .system-summary {
+      opacity: 0.8;
+      line-height: 1.4;
+    }
+    .system-flow-wrapper {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* System node (React Flow custom) */
+    .system-node {
+      background: var(--node-bg);
+      border: 2px solid var(--node-border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      min-width: 200px;
+      max-width: 300px;
+      font-size: 12px;
+      position: relative;
+      transition: box-shadow 0.15s;
+    }
+    .system-node:hover { box-shadow: 0 0 0 2px var(--accent); }
+    .system-node.selected { box-shadow: 0 0 0 3px var(--accent); }
+    .system-node-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .system-node-icon { font-size: 18px; }
+    .system-node-label {
+      font-weight: 700;
+      font-size: 14px;
+    }
+    .system-node-desc {
+      font-size: 11px;
+      opacity: 0.7;
+      line-height: 1.4;
+      margin-bottom: 8px;
+    }
+    .system-node-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10px;
+      opacity: 0.5;
+    }
+    .system-node-type {
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+    }
+    .system-node-count {
+      background: var(--badge-bg);
+      color: var(--badge-fg);
+      border-radius: 8px;
+      padding: 1px 6px;
+    }
+    .system-node-bar {
+      height: 3px;
+      border-radius: 0 0 8px 8px;
+      margin: 8px -16px -12px;
+    }
+
+    /* ===== Modal Overlay ===== */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      backdrop-filter: blur(2px);
+    }
+
+    /* ===== Model Selector ===== */
+    .model-selector {
+      background: var(--node-bg);
+      border: 1px solid var(--node-border);
+      border-radius: 12px;
+      width: 520px;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+    }
+    .model-selector-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .model-selector-header h2 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--fg);
+      font-size: 18px;
+      cursor: pointer;
+      opacity: 0.6;
+      padding: 4px;
+    }
+    .modal-close:hover { opacity: 1; }
+
+    .model-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 40px 20px;
+      font-size: 13px;
+      opacity: 0.6;
+    }
+
+    .model-notice {
+      padding: 24px 20px;
+      text-align: center;
+    }
+    .notice-icon {
+      font-size: 40px;
+      margin-bottom: 12px;
+    }
+    .model-notice h3 {
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+    .model-notice p {
+      font-size: 13px;
+      opacity: 0.7;
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
+    .install-steps {
+      text-align: left;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .step {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .step-num {
+      background: var(--accent);
+      color: #fff;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .step strong {
+      display: block;
+      margin-bottom: 2px;
+    }
+    .step p {
+      font-size: 12px;
+      margin: 0;
+    }
+    .step code {
+      background: var(--input-bg);
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .btn-retry {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 8px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .btn-retry:hover { opacity: 0.9; }
+
+    .model-list {
+      padding: 16px 20px;
+    }
+    .model-list-desc {
+      font-size: 12px;
+      opacity: 0.6;
+      margin-bottom: 14px;
+    }
+    .model-card {
+      border: 1px solid var(--node-border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .model-card.available:hover {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .model-card.unavailable {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .model-card.selected {
+      border-color: #7c4dff;
+      box-shadow: 0 0 0 2px #7c4dff;
+    }
+    .model-card.selecting {
+      opacity: 0.7;
+    }
+    .model-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .model-card-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .model-card-title h3 {
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .model-active-badge {
+      background: #4caf50;
+      color: #fff;
+      padding: 1px 8px;
+      border-radius: 8px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .model-status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .model-status-dot.installed { background: #4caf50; }
+    .model-status-dot.not-installed { background: #f44336; }
+    .model-desc {
+      font-size: 12px;
+      opacity: 0.7;
+      margin-bottom: 8px;
+    }
+    .model-specs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .spec-tag {
+      background: var(--badge-bg);
+      color: var(--badge-fg);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+    }
+    .tag-installed { background: rgba(76,175,80,0.2); color: #81c784; }
+    .tag-missing { background: rgba(244,67,54,0.2); color: #e57373; }
+    .model-install-hint {
+      margin-top: 8px;
+      font-size: 11px;
+      opacity: 0.6;
+    }
+    .model-install-hint code {
+      background: var(--input-bg);
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+
+    /* ===== Chat Panel ===== */
+    .chat-fab {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #1a237e 0%, #4a148c 100%);
+      border: 2px solid #7c4dff;
+      color: #fff;
+      font-size: 20px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      z-index: 100;
+      transition: transform 0.2s;
+    }
+    .chat-fab:hover { transform: scale(1.1); }
+    .chat-fab-icon { line-height: 1; }
+
+    .chat-panel {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 400px;
+      height: 520px;
+      background: var(--node-bg);
+      border: 1px solid var(--node-border);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      z-index: 100;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      overflow: hidden;
+    }
+
+    .chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(26,35,126,0.2);
+    }
+    .chat-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .chat-header-icon { font-size: 18px; }
+    .chat-header h3 {
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .chat-header-actions {
+      display: flex;
+      gap: 4px;
+    }
+    .chat-action-btn {
+      background: none;
+      border: none;
+      color: var(--fg);
+      cursor: pointer;
+      font-size: 14px;
+      opacity: 0.6;
+      padding: 2px 4px;
+    }
+    .chat-action-btn:hover { opacity: 1; }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+    .chat-messages::-webkit-scrollbar { width: 5px; }
+    .chat-messages::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+    .chat-welcome {
+      text-align: center;
+      padding: 20px 10px;
+    }
+    .chat-welcome-icon { font-size: 36px; margin-bottom: 8px; }
+    .chat-welcome h4 { font-size: 14px; margin-bottom: 6px; }
+    .chat-welcome p {
+      font-size: 12px;
+      opacity: 0.6;
+      line-height: 1.4;
+      margin-bottom: 14px;
+    }
+    .chat-suggestions {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .chat-suggestion {
+      background: var(--input-bg);
+      border: 1px solid var(--input-border);
+      color: var(--fg);
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 12px;
+      text-align: left;
+      transition: border-color 0.15s;
+    }
+    .chat-suggestion:hover { border-color: var(--accent); }
+
+    .chat-message {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .chat-message-avatar {
+      font-size: 16px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .chat-message-content {
+      flex: 1;
+      min-width: 0;
+    }
+    .chat-message-text {
+      background: var(--input-bg);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.5;
+      word-wrap: break-word;
+    }
+    .chat-message-user .chat-message-text {
+      background: rgba(0,122,204,0.2);
+      border: 1px solid rgba(0,122,204,0.3);
+    }
+    .chat-message-assistant .chat-message-text {
+      background: var(--input-bg);
+      border: 1px solid var(--input-border);
+    }
+    .chat-cursor {
+      animation: blink 0.8s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .chat-inline-code {
+      background: rgba(255,255,255,0.08);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+    }
+
+    .chat-speak-btn {
+      background: none;
+      border: none;
+      color: var(--fg);
+      cursor: pointer;
+      font-size: 12px;
+      opacity: 0.4;
+      margin-top: 4px;
+      padding: 2px 4px;
+    }
+    .chat-speak-btn:hover { opacity: 0.8; }
+
+    .chat-error {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: rgba(244,67,54,0.1);
+      border: 1px solid rgba(244,67,54,0.3);
+      border-radius: 8px;
+      font-size: 12px;
+      color: #e57373;
+      margin-bottom: 8px;
+    }
+    .chat-error-icon { font-size: 14px; }
+    .chat-error-dismiss {
+      margin-left: auto;
+      background: none;
+      border: none;
+      color: #e57373;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .chat-input-area {
+      display: flex;
+      align-items: flex-end;
+      gap: 6px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+    }
+    .chat-input {
+      flex: 1;
+      background: var(--input-bg);
+      border: 1px solid var(--input-border);
+      color: var(--input-fg);
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: inherit;
+      resize: none;
+      outline: none;
+      max-height: 80px;
+      line-height: 1.4;
+    }
+    .chat-input:focus { border-color: var(--accent); }
+    .chat-input:disabled { opacity: 0.5; }
+    .chat-input-actions {
+      display: flex;
+      gap: 4px;
+    }
+    .chat-voice-btn,
+    .chat-send-btn {
+      background: var(--node-bg);
+      border: 1px solid var(--node-border);
+      color: var(--fg);
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+    .chat-voice-btn:hover,
+    .chat-send-btn:hover { background: var(--node-selected); }
+    .chat-voice-btn.recording {
+      background: rgba(244,67,54,0.2);
+      border-color: #f44336;
+      animation: pulse 1s ease-in-out infinite;
+    }
+    @keyframes pulse { 50% { opacity: 0.7; } }
+    .chat-send-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+    .chat-send-spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
   `;
 }

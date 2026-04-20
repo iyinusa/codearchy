@@ -51,9 +51,60 @@ export interface ArchitectureGraph {
     metadata: GraphMetadata;
 }
 
-export type ViewMode = 'reactflow' | 'cytoscape';
+export type ViewMode = 'system' | 'reactflow' | 'cytoscape';
 
 export interface WebviewMessage {
     type: string;
     payload: unknown;
+}
+
+// AI Model types
+export interface ModelOption {
+    id: 'gemma-e2b' | 'gemma-e4b';
+    label: string;
+    ollamaTag: string;
+    description: string;
+    paramSize: string;
+    diskSize: string;
+    ramRequired: string;
+    installed: boolean;
+}
+
+export interface ModelStatusPayload {
+    ollamaRunning: boolean;
+    models: ModelOption[];
+    selectedModel: string | null;
+}
+
+// System Architecture types
+export interface SystemArchNode {
+    id: string;
+    label: string;
+    description: string;
+    type: 'subsystem' | 'layer' | 'service' | 'external';
+    color: string;
+    children?: string[];
+}
+
+export interface SystemArchEdge {
+    id: string;
+    source: string;
+    target: string;
+    label: string;
+    type: 'dependency' | 'data-flow' | 'api-call' | 'event';
+}
+
+export interface SystemArchitecture {
+    nodes: SystemArchNode[];
+    edges: SystemArchEdge[];
+    pattern: string;
+    summary: string;
+}
+
+// Chat types
+export interface ChatMessage {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    timestamp: number;
+    isStreaming?: boolean;
 }
