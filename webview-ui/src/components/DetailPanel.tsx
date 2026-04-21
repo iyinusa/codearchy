@@ -1,5 +1,6 @@
 import React from 'react';
 import type { ArchitectureGraph, GraphNode } from '../types';
+import { Icon } from './Icons';
 
 interface DetailPanelProps {
     node: GraphNode;
@@ -15,7 +16,9 @@ export function DetailPanel({ node, graph, onClose, onNavigateToFile }: DetailPa
 
     return (
         <div className="detail-panel">
-            <button className="detail-close" onClick={onClose}>✕</button>
+            <button className="detail-close" onClick={onClose} title="Close">
+                <Icon name="close" />
+            </button>
             <h3>{node.id}</h3>
             <div className="detail-row">
                 <span className="detail-label">Group:</span>

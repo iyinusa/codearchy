@@ -17,6 +17,8 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { SystemArchitecture, SystemArchNode } from '../types';
+import { Icon } from './Icons';
+import type { AppIconName } from './Icons';
 
 interface SystemViewProps {
     architecture: SystemArchitecture;
@@ -32,11 +34,11 @@ function SystemNode({ data, selected }: NodeProps) {
         childCount: number;
     };
 
-    const typeIcons: Record<string, string> = {
-        subsystem: '⬡',
-        layer: '▧',
-        service: '◈',
-        external: '◇',
+    const typeIcons: Record<string, AppIconName> = {
+        subsystem: 'nodeSubsystem',
+        layer: 'nodeLayer',
+        service: 'nodeService',
+        external: 'nodeExternal',
     };
 
     return (
@@ -47,7 +49,7 @@ function SystemNode({ data, selected }: NodeProps) {
             <Handle type="target" position={Position.Top} className="handle" />
             <div className="system-node-header">
                 <span className="system-node-icon" style={{ color: nodeData.color }}>
-                    {typeIcons[nodeData.nodeType] || '⬡'}
+                    <Icon name={typeIcons[nodeData.nodeType] ?? 'nodeSubsystem'} fixedWidth />
                 </span>
                 <span className="system-node-label">{nodeData.label}</span>
             </div>

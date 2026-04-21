@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { postMessage } from '../vscode';
 import type { ChatMessage } from '../types';
+import { Icon } from './Icons';
 
 interface ChatPanelProps {
     isOpen: boolean;
@@ -188,7 +189,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     if (!isOpen) {
         return (
             <button className="chat-fab" onClick={onToggle} title="Open Architecture Chat">
-                <span className="chat-fab-icon">💬</span>
+                <Icon name="chatFab" size="lg" />
             </button>
         );
     }
@@ -197,15 +198,15 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         <div className="chat-panel">
             <div className="chat-header">
                 <div className="chat-header-left">
-                    <span className="chat-header-icon">🏗</span>
+                    <Icon name="systemView" className="chat-header-icon" />
                     <h3>Architecture Assistant</h3>
                 </div>
                 <div className="chat-header-actions">
                     <button className="chat-action-btn" onClick={clearChat} title="Clear conversation">
-                        🗑
+                        <Icon name="clearChat" />
                     </button>
                     <button className="chat-action-btn" onClick={onToggle} title="Minimize">
-                        ▾
+                        <Icon name="minimize" />
                     </button>
                 </div>
             </div>
@@ -213,7 +214,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             <div className="chat-messages">
                 {messages.length === 0 && (
                     <div className="chat-welcome">
-                        <div className="chat-welcome-icon">🏗</div>
+                        <div className="chat-welcome-icon">
+                            <Icon name="systemView" size="2x" />
+                        </div>
                         <h4>Architecture Assistant</h4>
                         <p>Ask questions about your codebase architecture, subsystems, dependencies, and design patterns.</p>
                         <div className="chat-suggestions">
@@ -242,7 +245,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 {messages.map((msg, i) => (
                     <div key={i} className={`chat-message chat-message-${msg.role}`}>
                         <div className="chat-message-avatar">
-                            {msg.role === 'user' ? '👤' : '🤖'}
+                            {msg.role === 'user' ? (
+                                <Icon name="userAvatar" />
+                            ) : (
+                                window.CODEARCY_ICON_URI
+                                    ? <img src={window.CODEARCY_ICON_URI} alt="CodeArchy" className="chat-avatar-icon" />
+                                    : <Icon name="botAvatar" />
+                            )}
                         </div>
                         <div className="chat-message-content">
                             <div className="chat-message-text">
@@ -255,7 +264,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                     onClick={() => speakText(msg.content)}
                                     title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
                                 >
-                                    {isSpeaking ? '⏹' : '🔊'}
+                                    <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />
                                 </button>
                             )}
                         </div>
@@ -264,9 +273,11 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
                 {error && (
                     <div className="chat-error">
-                        <span className="chat-error-icon">⚠</span>
+                        <Icon name="warning" className="chat-error-icon" />
                         <span>{error}</span>
-                        <button className="chat-error-dismiss" onClick={() => setError(null)}>✕</button>
+                        <button className="chat-error-dismiss" onClick={() => setError(null)}>
+                            <Icon name="close" />
+                        </button>
                     </div>
                 )}
 
@@ -291,7 +302,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         title={isRecording ? 'Stop recording' : 'Voice input'}
                         disabled={isStreaming}
                     >
-                        {isRecording ? '⏹' : '🎙'}
+                        <Icon name={isRecording ? 'stopAction' : 'voiceInput'} />
                     </button>
                     <button
                         className="chat-send-btn"
@@ -300,9 +311,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         title="Send message"
                     >
                         {isStreaming ? (
-                            <span className="chat-send-spinner" />
+                            <Icon name="spinner" spin />
                         ) : (
-                            '➤'
+                            <Icon name="send" />
                         )}
                     </button>
                 </div>

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { postMessage } from '../vscode';
 import type { ModelStatusPayload, ModelOption } from '../types';
+import { Icon } from './Icons';
 
 interface ModelSelectorProps {
     onClose: () => void;
@@ -37,7 +38,9 @@ export function ModelSelector({ onClose }: ModelSelectorProps) {
             <div className="model-selector" onClick={(e) => e.stopPropagation()}>
                 <div className="model-selector-header">
                     <h2>AI Model Configuration</h2>
-                    <button className="modal-close" onClick={onClose}>✕</button>
+                    <button className="modal-close" onClick={onClose} title="Close">
+                        <Icon name="close" />
+                    </button>
                 </div>
 
                 {loading ? (
@@ -47,7 +50,7 @@ export function ModelSelector({ onClose }: ModelSelectorProps) {
                     </div>
                 ) : !status?.ollamaRunning ? (
                     <div className="model-notice">
-                        <div className="notice-icon">⚠</div>
+                        <div className="notice-icon"><Icon name="warning" size="2x" /></div>
                         <h3>Ollama Not Detected</h3>
                         <p>CodeArchy requires <strong>Ollama</strong> running locally for AI-powered architecture analysis.</p>
                         <div className="install-steps">
@@ -77,7 +80,7 @@ export function ModelSelector({ onClose }: ModelSelectorProps) {
                             setLoading(true);
                             postMessage('requestModelStatus');
                         }}>
-                            ↻ Retry Connection
+                            <Icon name="refresh" /> Retry Connection
                         </button>
                     </div>
                 ) : (
@@ -106,7 +109,9 @@ export function ModelSelector({ onClose }: ModelSelectorProps) {
                                     <span className="spec-tag">{model.ramRequired}</span>
                                     <span className="spec-tag">{model.diskSize} </span>
                                     <span className={`spec-tag ${model.installed ? 'tag-installed' : 'tag-missing'}`}>
-                                        {model.installed ? '✓ Installed' : '✗ Not installed'}
+                                        {model.installed
+                                            ? <><Icon name="installed" /> Installed</>
+                                            : <><Icon name="notInstalled" /> Not installed</>}
                                     </span>
                                 </div>
                                 {!model.installed && (

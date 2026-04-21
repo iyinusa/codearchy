@@ -1,5 +1,6 @@
 import React from 'react';
 import type { ViewMode } from '../types';
+import { Icon } from './Icons';
 
 interface ToolbarProps {
     viewMode: ViewMode;
@@ -37,21 +38,21 @@ export function Toolbar({
                     title="AI System Architecture View"
                     disabled={!hasSystemArch && !isGeneratingArch}
                 >
-                    🏗 System
+                    <Icon name="systemView" fixedWidth />  System
                 </button>
                 <button
                     className={`toolbar-btn ${viewMode === 'reactflow' ? 'active' : ''}`}
                     onClick={() => onViewModeChange('reactflow')}
                     title="React Flow View"
                 >
-                    ⊞ Flow
+                    <Icon name="flowView" fixedWidth /> Flow
                 </button>
                 <button
                     className={`toolbar-btn ${viewMode === 'cytoscape' ? 'active' : ''}`}
                     onClick={() => onViewModeChange('cytoscape')}
                     title="Cytoscape Dense View"
                 >
-                    ◉ Dense
+                    <Icon name="denseView" fixedWidth /> Dense
                 </button>
             </div>
             <div className="toolbar-group">
@@ -62,9 +63,9 @@ export function Toolbar({
                     title={isGeneratingArch ? 'Generating architecture...' : 'Generate AI System Architecture'}
                 >
                     {isGeneratingArch ? (
-                        <><span className="btn-spinner" /> Analyzing...</>
+                        <><Icon name="spinner" spin fixedWidth /> Analyzing...</>
                     ) : (
-                        '✦ AI Analyze'
+                        <><Icon name="aiAnalyze" fixedWidth /> AI Analyze</>
                     )}
                 </button>
                 <button
@@ -72,7 +73,7 @@ export function Toolbar({
                     onClick={onOpenModelSelector}
                     title="AI Model Settings"
                 >
-                    ⚙ Model
+                    <Icon name="modelSettings" fixedWidth /> Model
                 </button>
             </div>
             <div className="toolbar-group">
@@ -81,18 +82,16 @@ export function Toolbar({
                     onClick={onToggleMiniMap}
                     title={showMiniMap ? 'Hide Mini Map' : 'Show Mini Map'}
                 >
-                    ⧉ Map
+                    <Icon name="miniMap" fixedWidth /> Map
                 </button>
-            </div>
-            <div className="toolbar-group">
                 <button className="toolbar-btn" onClick={onRefresh} title="Refresh">
-                    ↻
+                    <Icon name="refresh" />
                 </button>
                 <button className="toolbar-btn" onClick={onExportSVG} title="Export SVG">
-                    SVG
+                    <Icon name="exportSvg" fixedWidth /> SVG
                 </button>
                 <button className="toolbar-btn" onClick={onExportPNG} title="Export PNG">
-                    PNG
+                    <Icon name="exportPng" fixedWidth /> PNG
                 </button>
             </div>
         </div>

@@ -437,6 +437,9 @@ export class ArchitecturePanel {
       const cssUri = webview.asWebviewUri(
         vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'webview.css')
       );
+      const iconUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
+      );
 
       return /*html*/ `<!DOCTYPE html>
 <html lang="en">
@@ -452,6 +455,7 @@ export class ArchitecturePanel {
 </head>
 <body>
   <div id="root"></div>
+  <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}";</script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -2133,6 +2137,13 @@ function getBaseStyles(): string {
       font-size: 16px;
       flex-shrink: 0;
       margin-top: 2px;
+    }
+    .chat-avatar-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      object-fit: contain;
+      display: block;
     }
     .chat-message-content {
       flex: 1;

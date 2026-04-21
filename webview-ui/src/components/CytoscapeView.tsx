@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 'react';
 import cytoscape from 'cytoscape';
 import type { ArchitectureGraph } from '../types';
+import { Icon } from './Icons';
 
 // Dynamically import dagre layout if available
 let dagreRegistered = false;
@@ -15,6 +16,12 @@ try {
     // dagre not available, use default layouts
 }
 
+/** Handle exposed to parent via forwardRef — used for view-aware export */
+export interface CytoscapeViewHandle {
+    exportPNG(): string | null;
+    exportSVG(): string | null;
+}
+
 interface CytoscapeViewProps {
     graph: ArchitectureGraph;
     selectedNodeId: string | null;
@@ -23,13 +30,13 @@ interface CytoscapeViewProps {
     onNodeSelect: (nodeId: string | null) => void;
 }
 
-export function CytoscapeView({
+export const CytoscapeView = forwardRef<CytoscapeViewHandle, CytoscapeViewProps>(function CytoscapeView({
     graph,
     selectedNodeId,
     highlightedSubsystem,
     searchTerm,
     onNodeSelect,
-}: CytoscapeViewProps) {
+}, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<cytoscape.Core | null>(null);
 
@@ -208,15 +215,29 @@ export function CytoscapeView({
         return () => observer.disconnect();
     }, []);
 
+    // Expose export methods to parent via forwardRef
+    useImperativeHandle(ref, () => ({
+        exportPNG(): string | null {
+            if (!cyRef.current) return null;
+            // cy.png() returns a base64 data URI; strip the prefix for consistency with other exporters
+            const dataUri = (cyRef.current as cytoscape.Core).png({ full: true, bg: '#1e1e1e', scale: 2 });
+            return typeof dataUri === 'string' ? dataUri.replace(/^data:image\/png;base64,/, '') : null;
+        },
+        exportSVG(): string | null {
+            if (!cyRef.current) return null;
+            return generateCytoscapeSVG(graph, cyRef.current);
+        },
+    }), [graph]);
+
     return (
         <div className="cytoscape-container">
             <div ref={containerRef} className="cytoscape-canvas" />
             <button className="cy-fit-btn" onClick={handleFit} title="Fit to view">
-                ⊞
+                <Icon name="fitView" />
             </button>
         </div>
     );
-}
+});
 
 function getLayout(nodeCount: number): cytoscape.LayoutOptions {
     if (dagreRegistered && nodeCount < 200) {
@@ -325,4 +346,84 @@ function getCytoscapeStyle(): cytoscape.StylesheetStyle[] {
             },
         },
     ];
+}
+
+/**
+ * Generate an SVG snapshot of the current Cytoscape layout.
+ * Uses actual node positions from the live cytoscape instance so the export
+ * matches exactly what the user sees on screen.
+ */
+function generateCytoscapeSVG(graph: ArchitectureGraph, cy: cytoscape.Core): string {
+    const nodeWidth = 100;
+    const nodeHeight = 36;
+    const padding = 40;
+
+    // Collect positions from the live layout
+    const positions: Record<string, { x: number; y: number }> = {};
+    cy.nodes('[type="module"]').forEach((node) => {
+        const pos = node.position();
+        positions[node.id()] = { x: pos.x, y: pos.y };
+    });
+
+    const allPos = Object.values(positions);
+    if (allPos.length === 0) return '<svg xmlns="http://www.w3.org/2000/svg"/>';
+
+    const minX = Math.min(...allPos.map(p => p.x)) - padding;
+    const minY = Math.min(...allPos.map(p => p.y)) - padding;
+    const maxX = Math.max(...allPos.map(p => p.x)) + nodeWidth + padding;
+    const maxY = Math.max(...allPos.map(p => p.y)) + nodeHeight + padding;
+    const w = maxX - minX;
+    const h = maxY - minY;
+
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="${minX} ${minY} ${w} ${h}">`;
+    svg += `<rect x="${minX}" y="${minY}" width="${w}" height="${h}" fill="#1e1e1e"/>`;
+    svg += '<defs><marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#555"/></marker></defs>';
+
+    // Draw subsystem bounding boxes
+    for (const subsystem of graph.subsystems) {
+        const subPositions = subsystem.nodeIds
+            .map(id => positions[id])
+            .filter(Boolean);
+        if (subPositions.length === 0) continue;
+        const sx = Math.min(...subPositions.map(p => p.x)) - 18;
+        const sy = Math.min(...subPositions.map(p => p.y)) - 24;
+        const ex = Math.max(...subPositions.map(p => p.x)) + nodeWidth + 18;
+        const ey = Math.max(...subPositions.map(p => p.y)) + nodeHeight + 12;
+        svg += `<rect x="${sx}" y="${sy}" width="${ex - sx}" height="${ey - sy}" rx="8" fill="${subsystem.color}12" stroke="${subsystem.color}" stroke-width="1" stroke-dasharray="4 2" opacity="0.6"/>`;
+        svg += `<text x="${sx + 8}" y="${sy + 14}" fill="${subsystem.color}" font-size="10" font-weight="bold" font-family="sans-serif">${escCy(subsystem.name)}</text>`;
+    }
+
+    // Draw edges
+    for (const edge of graph.edges) {
+        const src = positions[edge.source];
+        const tgt = positions[edge.target];
+        if (!src || !tgt) continue;
+        const sx = src.x + nodeWidth / 2;
+        const sy = src.y + nodeHeight;
+        const tx = tgt.x + nodeWidth / 2;
+        const ty = tgt.y;
+        svg += `<line x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" stroke="#555" stroke-width="1" opacity="0.4" marker-end="url(#arr)"/>`;
+    }
+
+    // Draw nodes
+    for (const node of graph.nodes) {
+        const pos = positions[node.id];
+        if (!pos) continue;
+        const subsystem = graph.subsystems.find(s => s.nodeIds.includes(node.id));
+        const color = subsystem?.color ?? '#454545';
+        svg += `<rect x="${pos.x}" y="${pos.y}" width="${nodeWidth}" height="${nodeHeight}" rx="5" fill="#252526" stroke="${color}" stroke-width="1.5"/>`;
+        svg += `<text x="${pos.x + 8}" y="${pos.y + 16}" fill="#d4d4d4" font-size="10" font-weight="600" font-family="sans-serif">${escCy(trunc(node.label, 16))}</text>`;
+        svg += `<text x="${pos.x + 8}" y="${pos.y + 28}" fill="#888" font-size="9" font-family="sans-serif">${escCy(String(node.metadata.language ?? ''))} · ${node.symbols.length}</text>`;
+    }
+
+    svg += '</svg>';
+    return svg;
+}
+
+function escCy(str: string): string {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function trunc(str: string, max: number): string {
+    return str.length > max ? str.slice(0, max) + '…' : str;
 }

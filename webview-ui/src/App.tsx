@@ -3,12 +3,14 @@ import { ArchitectureGraph, ViewMode, SystemArchitecture } from './types';
 import { postMessage } from './vscode';
 import { ReactFlowView } from './components/ReactFlowView';
 import { CytoscapeView } from './components/CytoscapeView';
+import type { CytoscapeViewHandle } from './components/CytoscapeView';
 import { SystemView } from './components/SystemView';
 import { Sidebar } from './components/Sidebar';
 import { DetailPanel } from './components/DetailPanel';
 import { Toolbar } from './components/Toolbar';
 import { ModelSelector } from './components/ModelSelector';
 import { ChatPanel } from './components/ChatPanel';
+import { Icon } from './components/Icons';
 
 export function App() {
     const [graph, setGraph] = useState<ArchitectureGraph | null>(null);
@@ -23,6 +25,7 @@ export function App() {
     const [archProgress, setArchProgress] = useState<string>('');
     const [chatOpen, setChatOpen] = useState(false);
     const mainContentRef = useRef<HTMLDivElement>(null);
+    const cytoscapeRef = useRef<CytoscapeViewHandle>(null);
 
     useEffect(() => {
         const handler = (event: MessageEvent) => {
@@ -66,37 +69,42 @@ export function App() {
     }, []);
 
     const exportAsSVG = useCallback(() => {
-        const container = mainContentRef.current;
-        if (!container || !graph) return;
+        if (viewMode === 'cytoscape') {
+            const svgContent = cytoscapeRef.current?.exportSVG();
+            if (svgContent) {
+                postMessage('exportResult', { format: 'svg', data: svgContent, mimeType: 'image/svg+xml' });
+            }
+            return;
+        }
+        if (viewMode === 'system' && systemArch) {
+            const svgContent = generateSystemArchSVG(systemArch);
+            postMessage('exportResult', { format: 'svg', data: svgContent, mimeType: 'image/svg+xml' });
+            return;
+        }
+        if (!graph) return;
         const svgContent = generateArchitectureSVG(graph);
         postMessage('exportResult', { format: 'svg', data: svgContent, mimeType: 'image/svg+xml' });
-    }, [graph]);
+    }, [graph, viewMode, systemArch]);
 
     const exportAsPNG = useCallback(() => {
-        const container = mainContentRef.current;
-        if (!container || !graph) return;
-        const svgContent = generateArchitectureSVG(graph);
-        const img = new Image();
-        const svgBlob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8' });
-        const url = URL.createObjectURL(svgBlob);
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            const scale = 2;
-            canvas.width = img.width * scale;
-            canvas.height = img.height * scale;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) return;
-            ctx.scale(scale, scale);
-            ctx.fillStyle = '#1e1e1e';
-            ctx.fillRect(0, 0, img.width, img.height);
-            ctx.drawImage(img, 0, 0);
-            URL.revokeObjectURL(url);
-            const dataUrl = canvas.toDataURL('image/png');
-            const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+        if (viewMode === 'cytoscape') {
+            const base64 = cytoscapeRef.current?.exportPNG();
+            if (base64) {
+                postMessage('exportResult', { format: 'png', data: base64, mimeType: 'image/png' });
+            }
+            return;
+        }
+        const svgContent =
+            viewMode === 'system' && systemArch
+                ? generateSystemArchSVG(systemArch)
+                : graph
+                    ? generateArchitectureSVG(graph)
+                    : null;
+        if (!svgContent) return;
+        svgToPng(svgContent, (base64) => {
             postMessage('exportResult', { format: 'png', data: base64, mimeType: 'image/png' });
-        };
-        img.src = url;
-    }, [graph]);
+        });
+    }, [graph, viewMode, systemArch]);
 
     const handleNodeSelect = useCallback((nodeId: string | null) => {
         setSelectedNodeId(nodeId);
@@ -168,11 +176,13 @@ export function App() {
                     ) : (
                         <div className="loading">
                             <div className="system-empty">
-                                <div className="system-empty-icon">🏗</div>
+                                <div className="system-empty-icon">
+                                    <Icon name="systemView" size="3x" />
+                                </div>
                                 <h3>System Architecture</h3>
-                                <p>Click <strong>"✦ AI Analyze"</strong> to generate a high-level system architecture using Gemma 4.</p>
+                                <p>Click <strong>"AI Analyze"</strong> to generate a high-level system architecture.</p>
                                 <button className="btn-generate" onClick={handleGenerateSystemArch}>
-                                    ✦ Generate System Architecture
+                                    <Icon name="aiAnalyze" /> Generate System Architecture
                                 </button>
                             </div>
                         </div>
@@ -189,6 +199,7 @@ export function App() {
                     />
                 ) : (
                     <CytoscapeView
+                        ref={cytoscapeRef}
                         graph={graph}
                         selectedNodeId={selectedNodeId}
                         highlightedSubsystem={highlightedSubsystem}
@@ -321,4 +332,95 @@ function escapeXml(str: string): string {
 
 function truncate(str: string, max: number): string {
     return str.length > max ? str.slice(0, max) + '…' : str;
+}
+
+/** Shared SVG-to-PNG helper: renders an SVG string to a PNG base64 string via canvas. */
+function svgToPng(svgContent: string, onDone: (base64: string) => void): void {
+    const img = new Image();
+    const svgBlob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+    img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const scale = 2;
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.scale(scale, scale);
+        ctx.fillStyle = '#1e1e1e';
+        ctx.fillRect(0, 0, img.width, img.height);
+        ctx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+        const dataUrl = canvas.toDataURL('image/png');
+        onDone(dataUrl.replace(/^data:image\/png;base64,/, ''));
+    };
+    img.src = url;
+}
+
+/** Generate a standalone SVG for the AI System Architecture view. */
+function generateSystemArchSVG(arch: SystemArchitecture): string {
+    const nodeW = 220;
+    const nodeH = 80;
+    const cols = Math.ceil(Math.sqrt(arch.nodes.length));
+    const spacingX = 300;
+    const spacingY = 160;
+    const padding = 50;
+
+    const positions: Record<string, { x: number; y: number }> = {};
+    arch.nodes.forEach((node, i) => {
+        positions[node.id] = {
+            x: (i % cols) * spacingX + padding,
+            y: Math.floor(i / cols) * spacingY + padding,
+        };
+    });
+
+    const allPos = Object.values(positions);
+    const maxX = Math.max(...allPos.map(p => p.x)) + nodeW + padding;
+    const maxY = Math.max(...allPos.map(p => p.y)) + nodeH + padding;
+
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${maxX}" height="${maxY}" viewBox="0 0 ${maxX} ${maxY}">`;
+    svg += `<rect width="${maxX}" height="${maxY}" fill="#1e1e1e"/>`;
+    svg += '<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#666"/></marker></defs>';
+
+    // Edges
+    for (const edge of arch.edges) {
+        const src = positions[edge.source];
+        const tgt = positions[edge.target];
+        if (!src || !tgt) continue;
+        const sx = src.x + nodeW / 2;
+        const sy = src.y + nodeH;
+        const tx = tgt.x + nodeW / 2;
+        const ty = tgt.y;
+        const edgeColors: Record<string, string> = {
+            'dependency': '#90A4AE',
+            'data-flow': '#4FC3F7',
+            'api-call': '#FFB74D',
+            'event': '#BA68C8',
+        };
+        const color = edgeColors[edge.type] ?? '#666';
+        svg += `<path d="M ${sx} ${sy} C ${sx} ${(sy + ty) / 2}, ${tx} ${(sy + ty) / 2}, ${tx} ${ty}" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.7" marker-end="url(#arrow)"/>`;
+        if (edge.label) {
+            const mx = (sx + tx) / 2;
+            const my = (sy + ty) / 2;
+            svg += `<rect x="${mx - 30}" y="${my - 8}" width="60" height="14" rx="3" fill="#252526" opacity="0.9"/>`;
+            svg += `<text x="${mx}" y="${my + 3}" fill="#aaa" font-size="9" font-family="sans-serif" text-anchor="middle">${escapeXml(edge.label)}</text>`;
+        }
+    }
+
+    // Nodes
+    for (const node of arch.nodes) {
+        const pos = positions[node.id];
+        if (!pos) continue;
+        svg += `<rect x="${pos.x}" y="${pos.y}" width="${nodeW}" height="${nodeH}" rx="8" fill="#252526" stroke="${node.color}" stroke-width="2"/>`;
+        svg += `<rect x="${pos.x}" y="${pos.y}" width="4" height="${nodeH}" rx="2" fill="${node.color}"/>`;
+        svg += `<text x="${pos.x + 16}" y="${pos.y + 24}" fill="${node.color}" font-size="13" font-weight="700" font-family="sans-serif">${escapeXml(node.label)}</text>`;
+        svg += `<text x="${pos.x + 16}" y="${pos.y + 42}" fill="#aaa" font-size="10" font-family="sans-serif">${escapeXml(truncate(node.description, 36))}</text>`;
+        svg += `<text x="${pos.x + 16}" y="${pos.y + 60}" fill="#666" font-size="9" font-family="sans-serif">${escapeXml(node.type)}</text>`;
+    }
+
+    // Banner with pattern
+    svg += `<text x="${padding}" y="20" fill="#555" font-size="11" font-family="sans-serif">${escapeXml(arch.pattern)}</text>`;
+
+    svg += '</svg>';
+    return svg;
 }

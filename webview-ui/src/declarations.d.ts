@@ -1,5 +1,6 @@
 // Allow CSS file imports (handled by esbuild at build time)
 declare module '*.css' {
+
     const content: Record<string, string>;
     export default content;
 }
@@ -26,6 +27,10 @@ interface SpeechRecognitionResult {
 interface SpeechRecognitionAlternative {
     readonly transcript: string;
     readonly confidence: number;
+}
+
+interface Window {
+    CODEARCY_ICON_URI?: string;
 }
 
 interface SpeechRecognition extends EventTarget {

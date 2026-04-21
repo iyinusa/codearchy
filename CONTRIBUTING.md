@@ -14,7 +14,7 @@ Thank you for your interest in contributing to CodeArchy! This document provides
 
 ```bash
 # Clone the repository
-git clone https://github.com/codearch/codearchy.git
+git clone https://github.com/iyinusa/codearchy.git
 cd codearchy
 
 # Install dependencies
