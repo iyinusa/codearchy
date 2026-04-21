@@ -38,7 +38,7 @@ export function Toolbar({
                     title="AI System Architecture View"
                     disabled={!hasSystemArch && !isGeneratingArch}
                 >
-                    <Icon name="systemView" fixedWidth />  System
+                    <Icon name="systemView" fixedWidth /> System
                 </button>
                 <button
                     className={`toolbar-btn ${viewMode === 'reactflow' ? 'active' : ''}`}
