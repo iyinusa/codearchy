@@ -12,17 +12,36 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
     const [isStreaming, setIsStreaming] = useState(false);
+    const [isThinking, setIsThinking] = useState(false);
+    const [thinkingText, setThinkingText] = useState('');
     const [isRecording, setIsRecording] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
+    const [isExpanded, setIsExpanded] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const messagesContainerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const recognitionRef = useRef<SpeechRecognition | null>(null);
+    const isAtBottomRef = useRef(true);
 
-    // Auto-scroll to bottom
+    // Auto-scroll only when the user is at/near the bottom.
+    // Use instant scrollTop (not smooth) so rapid streaming chunks don't
+    // spawn competing animations that fight the user's manual scroll.
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        if (isAtBottomRef.current) {
+            const container = messagesContainerRef.current;
+            if (container) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
     }, [messages]);
+
+    const handleMessagesScroll = useCallback(() => {
+        const container = messagesContainerRef.current;
+        if (!container) return;
+        isAtBottomRef.current =
+            container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    }, []);
 
     // Listen for chat responses
     useEffect(() => {
@@ -31,6 +50,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             switch (msg.type) {
                 case 'chatChunk': {
                     const chunk = msg.payload as { content: string };
+                    setIsThinking(false);
+                    setThinkingText('');
                     setMessages((prev) => {
                         const last = prev[prev.length - 1];
                         if (last && last.role === 'assistant' && last.isStreaming) {
@@ -53,6 +74,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 }
                 case 'chatResponse': {
                     const response = msg.payload as { content: string; error?: string };
+                    setIsThinking(false);
+                    setThinkingText('');
                     if (response.error) {
                         setError(response.error);
                         setIsStreaming(false);
@@ -79,10 +102,17 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     setIsStreaming(false);
                     break;
                 }
+                case 'chatThinking': {
+                    const think = msg.payload as { content: string };
+                    setThinkingText((prev) => prev + think.content);
+                    break;
+                }
                 case 'error': {
                     const errPayload = msg.payload as { message: string };
                     setError(errPayload.message);
                     setIsStreaming(false);
+                    setIsThinking(false);
+                    setThinkingText('');
                     break;
                 }
             }
@@ -103,7 +133,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             setMessages((prev) => [...prev, userMsg]);
             setInput('');
             setIsStreaming(true);
+            setIsThinking(true);
+            setThinkingText('');
             setError(null);
+            isAtBottomRef.current = true;
 
             postMessage('chatMessage', { content: text.trim() });
         },
@@ -195,7 +228,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     }
 
     return (
-        <div className="chat-panel">
+        <div className={`chat-panel${isExpanded ? ' chat-panel-expanded' : ''}`}>
             <div className="chat-header">
                 <div className="chat-header-left">
                     <Icon name="systemView" className="chat-header-icon" />
@@ -205,13 +238,20 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     <button className="chat-action-btn" onClick={clearChat} title="Clear conversation">
                         <Icon name="clearChat" />
                     </button>
+                    <button
+                        className="chat-action-btn"
+                        onClick={() => setIsExpanded((v) => !v)}
+                        title={isExpanded ? 'Collapse panel' : 'Expand panel'}
+                    >
+                        <Icon name={isExpanded ? 'collapsePanel' : 'expandPanel'} />
+                    </button>
                     <button className="chat-action-btn" onClick={onToggle} title="Minimize">
                         <Icon name="minimize" />
                     </button>
                 </div>
             </div>
 
-            <div className="chat-messages">
+            <div className="chat-messages" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
                 {messages.length === 0 && (
                     <div className="chat-welcome">
                         <div className="chat-welcome-icon">
@@ -271,6 +311,21 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     </div>
                 ))}
 
+                {isThinking && (
+                    <div className="chat-message chat-message-assistant">
+                        <div className="chat-message-avatar">
+                            {window.CODEARCY_ICON_URI
+                                ? <img src={window.CODEARCY_ICON_URI} alt="CodeArchy" className="chat-avatar-icon" />
+                                : <Icon name="botAvatar" />}
+                        </div>
+                        <div className="chat-message-content">
+                            <div className="chat-message-text chat-thinking-bubble">
+                                <ThinkingBubble text={thinkingText} />
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {error && (
                     <div className="chat-error">
                         <Icon name="warning" className="chat-error-icon" />
@@ -322,17 +377,198 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     );
 }
 
-/** Simple message formatter: handles markdown-like bold, code, and line breaks */
+/** Thinking indicator.
+ * - When the model streams thinking tokens, displays them verbatim with a cursor.
+ * - When no thinking tokens have arrived yet, shows a single animated "Thinking…" fallback.
+ */
+function ThinkingBubble({ text }: { text: string }) {
+    if (text) {
+        // Real reasoning streamed from the model — apply full markdown formatting
+        return (
+            <div className="chat-thinking-text">
+                <span className="chat-thinking-label">Reasoning</span>
+                <div className="chat-thinking-stream">
+                    {formatMessage(text)}<span className="chat-cursor">▊</span>
+                </div>
+            </div>
+        );
+    }
+
+    // Fallback: single animated label — no cycling phrases
+    return (
+        <span className="chat-thinking-text">
+            <span className="chat-thinking-label">Thinking</span>
+        </span>
+    );
+}
+
+/** Full markdown formatter: headers, lists, tables, code blocks, bold, italic, inline code */
 function formatMessage(text: string): React.ReactNode {
-    const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\n)/g);
-    return parts.map((part, i) => {
-        if (part === '\n') return <br key={i} />;
-        if (part.startsWith('`') && part.endsWith('`')) {
-            return <code key={i} className="chat-inline-code">{part.slice(1, -1)}</code>;
+    const lines = text.split('\n');
+    const nodes: React.ReactNode[] = [];
+    let i = 0;
+    let k = 0;
+
+    while (i < lines.length) {
+        const line = lines[i];
+
+        // Code fence
+        if (line.trimStart().startsWith('```')) {
+            const lang = line.trimStart().slice(3).trim();
+            const codeLines: string[] = [];
+            i++;
+            while (i < lines.length && !lines[i].trimStart().startsWith('```')) {
+                codeLines.push(lines[i]);
+                i++;
+            }
+            nodes.push(
+                <pre key={k++} className="chat-code-block">
+                    {lang && <span className="chat-code-lang">{lang}</span>}
+                    <code>{codeLines.join('\n')}</code>
+                </pre>
+            );
+            i++; // skip closing fence (or advance past end if unclosed)
+            continue;
         }
-        if (part.startsWith('**') && part.endsWith('**')) {
-            return <strong key={i}>{part.slice(2, -2)}</strong>;
+
+        // Headings
+        const hMatch = line.match(/^(#{1,6})\s+(.+)/);
+        if (hMatch) {
+            const level = Math.min(hMatch[1].length, 3);
+            const content = inlineFormat(hMatch[2]);
+            const key = k++;
+            if (level === 1) nodes.push(<h4 key={key} className="chat-md-h1">{content}</h4>);
+            else if (level === 2) nodes.push(<h5 key={key} className="chat-md-h2">{content}</h5>);
+            else nodes.push(<h6 key={key} className="chat-md-h3">{content}</h6>);
+            i++;
+            continue;
         }
-        return <span key={i}>{part}</span>;
-    });
+
+        // Table (lines starting with |)
+        if (line.startsWith('|')) {
+            const tableLines: string[] = [];
+            while (i < lines.length && lines[i].startsWith('|')) {
+                tableLines.push(lines[i]);
+                i++;
+            }
+            nodes.push(<MdTable key={k++} lines={tableLines} />);
+            continue;
+        }
+
+        // Unordered list (- item, * item, + item)
+        if (/^(\s*)[-*+] /.test(line)) {
+            const items: string[] = [];
+            while (i < lines.length && /^(\s*)[-*+] /.test(lines[i])) {
+                items.push(lines[i].replace(/^(\s*)[-*+] /, ''));
+                i++;
+            }
+            nodes.push(
+                <ul key={k++} className="chat-md-ul">
+                    {items.map((item, j) => <li key={j}>{inlineFormat(item)}</li>)}
+                </ul>
+            );
+            continue;
+        }
+
+        // Ordered list (1. item)
+        if (/^\s*\d+\.\s/.test(line)) {
+            const items: string[] = [];
+            while (i < lines.length && /^\s*\d+\.\s/.test(lines[i])) {
+                items.push(lines[i].replace(/^\s*\d+\.\s/, ''));
+                i++;
+            }
+            nodes.push(
+                <ol key={k++} className="chat-md-ol">
+                    {items.map((item, j) => <li key={j}>{inlineFormat(item)}</li>)}
+                </ol>
+            );
+            continue;
+        }
+
+        // Blockquote (> text)
+        if (line.startsWith('> ')) {
+            const bqLines: string[] = [];
+            while (i < lines.length && lines[i].startsWith('> ')) {
+                bqLines.push(lines[i].slice(2));
+                i++;
+            }
+            nodes.push(
+                <blockquote key={k++} className="chat-md-bq">
+                    {bqLines.map((bLine, j) => <p key={j}>{inlineFormat(bLine)}</p>)}
+                </blockquote>
+            );
+            continue;
+        }
+
+        // Horizontal rule
+        if (/^[-_*]{3,}\s*$/.test(line) && line.trim() !== '') {
+            nodes.push(<hr key={k++} className="chat-md-hr" />);
+            i++;
+            continue;
+        }
+
+        // Empty line — paragraph separator, skip
+        if (line.trim() === '') {
+            i++;
+            continue;
+        }
+
+        // Default paragraph
+        nodes.push(<p key={k++} className="chat-md-p">{inlineFormat(line)}</p>);
+        i++;
+    }
+
+    return <div className="chat-markdown">{nodes}</div>;
+}
+
+/** Render inline markdown: bold, italic, inline code */
+function inlineFormat(text: string): React.ReactNode {
+    const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*\n]+\*)/g);
+    return (
+        <>
+            {parts.map((part, i) => {
+                if (!part) return null;
+                if (part.startsWith('`') && part.endsWith('`') && part.length >= 3) {
+                    return <code key={i} className="chat-inline-code">{part.slice(1, -1)}</code>;
+                }
+                if (part.startsWith('**') && part.endsWith('**') && part.length >= 5) {
+                    return <strong key={i}>{part.slice(2, -2)}</strong>;
+                }
+                if (part.startsWith('*') && part.endsWith('*') && part.length >= 3) {
+                    return <em key={i}>{part.slice(1, -1)}</em>;
+                }
+                return <React.Fragment key={i}>{part}</React.Fragment>;
+            })}
+        </>
+    );
+}
+
+/** Render a markdown table */
+function MdTable({ lines }: { lines: string[] }) {
+    const parseRow = (row: string): string[] =>
+        row.split('|').slice(1, -1).map((c) => c.trim());
+
+    const isSeparator = (row: string) => /^\|[\s|:-]+\|$/.test(row.trim());
+
+    const headerRow = lines[0] ? parseRow(lines[0]) : [];
+    const dataLines = lines.filter((_, idx) => idx > 0 && !isSeparator(lines[idx]));
+
+    return (
+        <div className="chat-md-table-wrap">
+            <table className="chat-md-table">
+                {headerRow.length > 0 && (
+                    <thead>
+                        <tr>{headerRow.map((cell, i) => <th key={i}>{inlineFormat(cell)}</th>)}</tr>
+                    </thead>
+                )}
+                <tbody>
+                    {dataLines.map((row, ri) => (
+                        <tr key={ri}>
+                            {parseRow(row).map((cell, ci) => <td key={ci}>{inlineFormat(cell)}</td>)}
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
 }

@@ -127,7 +127,8 @@ export class OllamaService {
     async chat(
         message: string,
         modelTag: string,
-        onChunk?: (text: string) => void
+        onChunk?: (text: string) => void,
+        onThinkChunk?: (text: string) => void
     ): Promise<string> {
         this.conversationHistory.push({
             role: 'user',
@@ -144,7 +145,7 @@ export class OllamaService {
             })),
         ];
 
-        const response = await this.chatCompletion(modelTag, messages, onChunk);
+        const response = await this.chatCompletion(modelTag, messages, onChunk, onThinkChunk);
 
         this.conversationHistory.push({
             role: 'assistant',
@@ -354,13 +355,15 @@ GUIDELINES:
     private async chatCompletion(
         model: string,
         messages: Array<{ role: string; content: string }>,
-        onChunk?: (text: string) => void
+        onChunk?: (text: string) => void,
+        onThinkChunk?: (text: string) => void
     ): Promise<string> {
         return new Promise((resolve, reject) => {
             const body = JSON.stringify({
                 model,
                 messages,
                 stream: true,
+                think: true,
                 options: {
                     temperature: 0.5,
                     num_predict: 2048,
@@ -400,6 +403,10 @@ GUIDELINES:
                         if (!line.trim()) continue;
                         try {
                             const parsed = JSON.parse(line);
+                            // Thinking tokens (models that support think:true)
+                            if (parsed.message?.thinking) {
+                                onThinkChunk?.(parsed.message.thinking);
+                            }
                             if (parsed.message?.content) {
                                 fullResponse += parsed.message.content;
                                 onChunk?.(parsed.message.content);
@@ -414,6 +421,9 @@ GUIDELINES:
                     if (buffer.trim()) {
                         try {
                             const parsed = JSON.parse(buffer);
+                            if (parsed.message?.thinking) {
+                                onThinkChunk?.(parsed.message.thinking);
+                            }
                             if (parsed.message?.content) {
                                 fullResponse += parsed.message.content;
                                 onChunk?.(parsed.message.content);

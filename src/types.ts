@@ -121,6 +121,7 @@ export enum WebviewMessageType {
     ChatMessage = 'chatMessage',
     ChatResponse = 'chatResponse',
     ChatChunk = 'chatChunk',
+    ChatThinking = 'chatThinking',
     ClearChat = 'clearChat',
 }
 
