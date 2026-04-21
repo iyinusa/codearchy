@@ -51,6 +51,14 @@ import {
     faCubes,             // Subsystem node
     faServer,            // Service node
     faArrowUpRightFromSquare, // External node
+    faDatabase,          // Database / persistence
+    faBolt,              // Cache / fast in-memory
+    faEnvelopesBulk,     // Queue / message bus
+    faNetworkWired,      // API gateway / router
+    faDesktop,           // UI / frontend / client
+    faShieldHalved,      // Auth / security
+    faCloud,             // External cloud / third-party
+    faMicrochip,         // Worker / processor
 
     // Misc
     faExpand,            // Fit-to-view (Cytoscape) / expand panel
@@ -104,6 +112,14 @@ export const AppIcons: Record<string, IconDefinition> = {
     nodeLayer: faLayerGroup,
     nodeService: faServer,
     nodeExternal: faArrowUpRightFromSquare,
+    nodeDatabase: faDatabase,
+    nodeCache: faBolt,
+    nodeQueue: faEnvelopesBulk,
+    nodeGateway: faNetworkWired,
+    nodeUi: faDesktop,
+    nodeAuth: faShieldHalved,
+    nodeCloud: faCloud,
+    nodeWorker: faMicrochip,
 
     // ---- Misc ----
     fitView: faExpand,
