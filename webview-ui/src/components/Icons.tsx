@@ -53,7 +53,8 @@ import {
     faArrowUpRightFromSquare, // External node
 
     // Misc
-    faExpand,            // Fit-to-view (Cytoscape)
+    faExpand,            // Fit-to-view (Cytoscape) / expand panel
+    faCompress,          // Collapse panel
     faSpinner,           // Loading spinner
     faWandMagicSparkles, // AI magic (alternate AI icon)
 } from '@fortawesome/free-solid-svg-icons';
@@ -86,6 +87,8 @@ export const AppIcons: Record<string, IconDefinition> = {
     speakAloud: faVolumeHigh,
     userAvatar: faUser,
     botAvatar: faRobot,
+    expandPanel: faExpand,
+    collapsePanel: faCompress,
 
     // ---- Status / alerts ----
     warning: faTriangleExclamation,
