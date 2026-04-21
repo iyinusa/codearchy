@@ -1450,6 +1450,7 @@ function getBaseStyles(): string {
       flex: 1;
       width: 100%;
       height: 100%;
+      position: relative;
     }
     .react-flow__node { cursor: pointer; }
     .react-flow__minimap { border-radius: 4px; border: 1px solid var(--border); }
@@ -1469,10 +1470,14 @@ function getBaseStyles(): string {
       border-left-width: 3px;
       border-radius: 6px;
       padding: 8px 12px;
-      min-width: 130px;
-      max-width: 220px;
       font-size: 12px;
       position: relative;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
       transition: box-shadow 0.15s, opacity 0.2s;
     }
     .module-node:hover { box-shadow: 0 0 0 1px var(--accent); }
@@ -1494,15 +1499,17 @@ function getBaseStyles(): string {
     }
     .module-node-badge {
       position: absolute;
-      top: -6px;
-      right: -6px;
+      top: -8px;
+      right: -8px;
       background: var(--accent);
       color: #fff;
-      border-radius: 8px;
-      padding: 0 5px;
+      border-radius: 10px;
+      padding: 0 6px;
       font-size: 10px;
       font-weight: 600;
       line-height: 16px;
+      z-index: 2;
+      box-shadow: 0 0 0 2px var(--bg);
     }
     .module-node-group-bar {
       height: 3px;
@@ -1538,6 +1545,55 @@ function getBaseStyles(): string {
       padding: 0 5px;
       font-size: 10px;
       margin-left: 4px;
+    }
+
+    /* Subsystem group (parent container laid out by ELK) */
+    .subsystem-group-node {
+      width: 100%;
+      height: 100%;
+      border: 1.5px dashed;
+      border-radius: 10px;
+      box-sizing: border-box;
+      position: relative;
+      pointer-events: none;
+    }
+    .subsystem-group-header {
+      position: absolute;
+      top: 6px;
+      left: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--bg);
+      pointer-events: auto;
+    }
+    .subsystem-group-label { white-space: nowrap; }
+
+    /* Auto-layout overlay shown while ELK is computing positions */
+    .elk-layout-overlay {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      pointer-events: none;
+    }
+    .elk-layout-pill {
+      background: var(--node-bg);
+      border: 1px solid var(--node-border);
+      color: var(--fg);
+      border-radius: 999px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0.9;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
     }
 
     /* Cytoscape container */
@@ -1750,6 +1806,7 @@ function getBaseStyles(): string {
       flex: 1;
       width: 100%;
       height: 100%;
+      position: relative;
     }
 
     /* System node (React Flow custom) */
@@ -1758,14 +1815,21 @@ function getBaseStyles(): string {
       border: 2px solid var(--node-border);
       border-radius: 10px;
       padding: 12px 16px;
-      min-width: 200px;
-      max-width: 300px;
       font-size: 12px;
       position: relative;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       transition: box-shadow 0.15s;
     }
+    .system-node { transition: box-shadow 0.15s, opacity 0.2s, filter 0.2s; }
     .system-node:hover { box-shadow: 0 0 0 2px var(--accent); }
     .system-node.selected { box-shadow: 0 0 0 3px var(--accent); }
+    .system-node.dimmed { opacity: 0.18; filter: grayscale(0.6); }
+    .system-node.dimmed:hover { opacity: 0.9; filter: none; }
     .system-node-header {
       display: flex;
       align-items: center;
@@ -1776,12 +1840,20 @@ function getBaseStyles(): string {
     .system-node-label {
       font-weight: 700;
       font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .system-node-desc {
       font-size: 11px;
       opacity: 0.7;
       line-height: 1.4;
       margin-bottom: 8px;
+      flex: 1;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
     }
     .system-node-footer {
       display: flex;
@@ -1789,6 +1861,7 @@ function getBaseStyles(): string {
       justify-content: space-between;
       font-size: 10px;
       opacity: 0.5;
+      margin-top: auto;
     }
     .system-node-type {
       text-transform: uppercase;

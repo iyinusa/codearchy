@@ -1,4 +1,4 @@
-import React, { useMemo, useCallback } from 'react';
+import React, { useMemo, useCallback, useEffect, useState } from 'react';
 import {
     ReactFlow,
     Background,
@@ -14,9 +14,12 @@ import {
     Position,
     NodeProps,
     BackgroundVariant,
+    useReactFlow,
+    ReactFlowProvider,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import type { ArchitectureGraph, GraphNode, SubsystemInfo } from '../types';
+import type { ArchitectureGraph, GraphNode } from '../types';
+import { layoutWithElk, estimateNodeSize } from './elkLayout';
 
 interface ReactFlowViewProps {
     graph: ArchitectureGraph;
@@ -63,12 +66,16 @@ function ModuleNode({ data, selected }: NodeProps) {
     );
 }
 
-// Custom node for subsystem group headers
-function SubsystemNode({ data }: NodeProps) {
+// Small subsystem header label placed above its first module. Just a marker,
+// not a container — every module node stands alone in the layout.
+function SubsystemHeaderNode({ data }: NodeProps) {
     const nodeData = data as { label: string; color: string; count: number };
     return (
-        <div className="subsystem-header-node" style={{ borderColor: nodeData.color }}>
-            <div className="subsystem-header-dot" style={{ background: nodeData.color }} />
+        <div
+            className="subsystem-header-node"
+            style={{ borderColor: nodeData.color, color: nodeData.color }}
+        >
+            <span className="subsystem-header-dot" style={{ background: nodeData.color }} />
             <span>{nodeData.label}</span>
             <span className="subsystem-header-count">{nodeData.count}</span>
         </div>
@@ -77,10 +84,10 @@ function SubsystemNode({ data }: NodeProps) {
 
 const nodeTypes: NodeTypes = {
     moduleNode: ModuleNode,
-    subsystemNode: SubsystemNode,
+    subsystemHeaderNode: SubsystemHeaderNode,
 };
 
-export function ReactFlowView({
+function ReactFlowViewInner({
     graph,
     selectedNodeId,
     highlightedSubsystem,
@@ -89,18 +96,120 @@ export function ReactFlowView({
     onNavigateToFile,
     showMiniMap,
 }: ReactFlowViewProps) {
-    const { flowNodes, flowEdges } = useMemo(() => {
-        return buildFlowElements(graph, highlightedSubsystem, searchTerm, selectedNodeId);
-    }, [graph, highlightedSubsystem, searchTerm, selectedNodeId]);
+    // Build raw (unpositioned) elements from the graph structure only.
+    // Cosmetic state (dim / highlight / selection) is applied separately to
+    // avoid re-running the expensive auto-layout on every UI interaction.
+    const { rawNodes, rawEdges } = useMemo(
+        () => buildRawFlowElements(graph),
+        [graph]
+    );
 
-    const [nodes, setNodes, onNodesChange] = useNodesState(flowNodes);
-    const [edges, setEdges, onEdgesChange] = useEdgesState(flowEdges);
+    const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+    const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+    const [isLayouting, setIsLayouting] = useState(false);
+    const { fitView } = useReactFlow();
 
-    // Update nodes/edges when graph changes
-    React.useEffect(() => {
-        setNodes(flowNodes);
-        setEdges(flowEdges);
-    }, [flowNodes, flowEdges, setNodes, setEdges]);
+    // Auto-layout trigger: runs whenever the graph structure changes.
+    useEffect(() => {
+        let cancelled = false;
+        setIsLayouting(true);
+        layoutWithElk(rawNodes, rawEdges, {
+            algorithm: 'layered',
+            direction: 'DOWN',
+            edgeRouting: 'ORTHOGONAL',
+            nodeSpacing: 70,
+            layerSpacing: 110,
+            padding: 36,
+        })
+            .then(({ nodes: laidOut, edges: laidEdges }) => {
+                if (cancelled) return;
+                setNodes(laidOut);
+                setEdges(laidEdges);
+                requestAnimationFrame(() => {
+                    if (!cancelled) fitView({ padding: 0.2, duration: 300 });
+                });
+            })
+            .catch(err => {
+                console.error('[CodeArchy] ELK layout failed:', err);
+                if (!cancelled) {
+                    setNodes(rawNodes);
+                    setEdges(rawEdges);
+                }
+            })
+            .finally(() => {
+                if (!cancelled) setIsLayouting(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [rawNodes, rawEdges, setNodes, setEdges, fitView]);
+
+    // Apply cosmetic overlays (dim / highlight / selection) without re-layout.
+    useEffect(() => {
+        setNodes(curr =>
+            curr.map(n => {
+                if (n.type !== 'moduleNode') return n;
+                const graphNode = graph.nodes.find(g => g.id === n.id);
+                if (!graphNode) return n;
+                const dimmed = getDimmedState(
+                    graphNode,
+                    highlightedSubsystem,
+                    searchTerm,
+                    graph,
+                    selectedNodeId
+                );
+                const isSelected = n.id === selectedNodeId;
+                if ((n.data as any).dimmed === dimmed && n.selected === isSelected) {
+                    return n;
+                }
+                return {
+                    ...n,
+                    selected: isSelected,
+                    data: { ...n.data, dimmed },
+                };
+            })
+        );
+
+        setEdges(curr =>
+            curr.map(e => {
+                const isConnectedToSelected = selectedNodeId
+                    ? e.source === selectedNodeId || e.target === selectedNodeId
+                    : null;
+                const isHighlighted = selectedNodeId
+                    ? !!isConnectedToSelected
+                    : highlightedSubsystem === null ||
+                    !!graph.subsystems
+                        .find(s => s.id === highlightedSubsystem)
+                        ?.nodeIds.includes(e.source) ||
+                    !!graph.subsystems
+                        .find(s => s.id === highlightedSubsystem)
+                        ?.nodeIds.includes(e.target);
+                const opacity = selectedNodeId
+                    ? isConnectedToSelected
+                        ? 0.9
+                        : 0.08
+                    : isHighlighted
+                        ? 0.8
+                        : 0.25;
+                return {
+                    ...e,
+                    animated: selectedNodeId ? !!isConnectedToSelected : false,
+                    style: {
+                        ...(e.style || {}),
+                        stroke: isHighlighted ? 'var(--accent)' : 'var(--border)',
+                        strokeWidth: isHighlighted ? 2 : 1,
+                        opacity,
+                    },
+                    markerEnd: {
+                        type: MarkerType.ArrowClosed,
+                        width: 12,
+                        height: 12,
+                        color: isHighlighted ? 'var(--accent)' : 'var(--border)',
+                    },
+                };
+            })
+        );
+    }, [graph, selectedNodeId, highlightedSubsystem, searchTerm, setNodes, setEdges]);
 
     const onNodeClick = useCallback(
         (_event: React.MouseEvent, node: Node) => {
@@ -129,6 +238,11 @@ export function ReactFlowView({
 
     return (
         <div className="reactflow-container">
+            {isLayouting && (
+                <div className="elk-layout-overlay" aria-hidden>
+                    <div className="elk-layout-pill">Auto-layout…</div>
+                </div>
+            )}
             <ReactFlow
                 nodes={nodes}
                 edges={edges}
@@ -154,7 +268,7 @@ export function ReactFlowView({
                     <MiniMap
                         nodeColor={(node) => {
                             const data = node.data as { subsystemColor?: string; dimmed?: boolean };
-                            return data.dimmed ? '#333' : (data.subsystemColor || '#666');
+                            return data.dimmed ? '#333' : data.subsystemColor || '#666';
                         }}
                         maskColor="rgba(0, 0, 0, 0.6)"
                         style={{ background: 'var(--sidebar-bg)' }}
@@ -165,135 +279,90 @@ export function ReactFlowView({
     );
 }
 
-function buildFlowElements(
-    graph: ArchitectureGraph,
-    highlightedSubsystem: string | null,
-    searchTerm: string,
-    selectedNodeId: string | null
-): { flowNodes: Node[]; flowEdges: Edge[] } {
-    // Pre-compute connected nodes for focus/fade
-    const connectedNodeIds = new Set<string>();
-    if (selectedNodeId) {
-        connectedNodeIds.add(selectedNodeId);
-        for (const edge of graph.edges) {
-            if (edge.source === selectedNodeId) connectedNodeIds.add(edge.target);
-            if (edge.target === selectedNodeId) connectedNodeIds.add(edge.source);
+export function ReactFlowView(props: ReactFlowViewProps) {
+    return (
+        <ReactFlowProvider>
+            <ReactFlowViewInner {...props} />
+        </ReactFlowProvider>
+    );
+}
+
+function buildRawFlowElements(
+    graph: ArchitectureGraph
+): { rawNodes: (Node & { width?: number; height?: number })[]; rawEdges: Edge[] } {
+    const rawNodes: (Node & { width?: number; height?: number })[] = [];
+    const rawEdges: Edge[] = [];
+
+    // Map each module id to its subsystem color so we can tint border bars
+    // without needing parent containers.
+    const subsystemByNodeId = new Map<string, { name: string; color: string }>();
+    for (const sub of graph.subsystems) {
+        for (const nid of sub.nodeIds) {
+            subsystemByNodeId.set(nid, { name: sub.name, color: sub.color });
         }
     }
 
-    const flowNodes: Node[] = [];
-    const flowEdges: Edge[] = [];
+    // Flat nodes: every module stands alone, ELK places them, the subsystem
+    // colour on the left border communicates grouping visually. Sorting by
+    // subsystem before handing to ELK lets its `considerModelOrder` heuristic
+    // cluster same-subsystem modules near each other.
+    const subsystemIndex = new Map<string, number>();
+    graph.subsystems.forEach((s, i) => subsystemIndex.set(s.id, i));
+    const sortedGraphNodes = [...graph.nodes].sort((a, b) => {
+        const aSub = graph.subsystems.find(s => s.name === (a.group || ''));
+        const bSub = graph.subsystems.find(s => s.name === (b.group || ''));
+        const ai = aSub ? subsystemIndex.get(aSub.id)! : 999;
+        const bi = bSub ? subsystemIndex.get(bSub.id)! : 999;
+        if (ai !== bi) return ai - bi;
+        return a.label.localeCompare(b.label);
+    });
 
-    // Group nodes by subsystem for layout
-    const groups: Record<string, GraphNode[]> = {};
-    for (const node of graph.nodes) {
-        const group = node.group || 'ungrouped';
-        if (!groups[group]) groups[group] = [];
-        groups[group].push(node);
+    for (const node of sortedGraphNodes) {
+        const sub = subsystemByNodeId.get(node.id);
+        const size = estimateNodeSize(
+            node.label,
+            `${(node.metadata.language as string) || ''} · ${node.symbols.length} symbols`,
+            { minWidth: 180, maxWidth: 240, padding: 28 }
+        );
+        rawNodes.push({
+            id: node.id,
+            type: 'moduleNode',
+            position: { x: 0, y: 0 },
+            width: size.width,
+            height: Math.max(size.height, 80),
+            data: {
+                label: node.label,
+                fullPath: node.id,
+                language: (node.metadata.language as string) || '',
+                symbolCount: node.symbols.length,
+                subsystemColor: sub?.color || '',
+                dimmed: false,
+            },
+        });
     }
 
-    const groupNames = Object.keys(groups);
-    const cols = Math.ceil(Math.sqrt(groupNames.length));
-    const groupSpacingX = 500;
-    const groupSpacingY = 400;
-    const nodeSpacingX = 220;
-    const nodeSpacingY = 100;
-
-    let groupIndex = 0;
-    for (const groupName of groupNames) {
-        const groupNodes = groups[groupName];
-        const groupCol = groupIndex % cols;
-        const groupRow = Math.floor(groupIndex / cols);
-        const baseX = groupCol * groupSpacingX + 50;
-        const baseY = groupRow * groupSpacingY + 80;
-
-        // Find subsystem for this group
-        const subsystem = graph.subsystems.find(s => s.name === groupName);
-
-        // Add subsystem header node
-        if (subsystem) {
-            flowNodes.push({
-                id: `group-${subsystem.id}`,
-                type: 'subsystemNode',
-                position: { x: baseX - 10, y: baseY - 50 },
-                data: {
-                    label: subsystem.name,
-                    color: subsystem.color,
-                    count: subsystem.nodeIds.length,
-                },
-                draggable: true,
-                selectable: false,
-            });
-        }
-
-        const innerCols = Math.ceil(Math.sqrt(groupNodes.length));
-        for (let i = 0; i < groupNodes.length; i++) {
-            const node = groupNodes[i];
-            const col = i % innerCols;
-            const row = Math.floor(i / innerCols);
-
-            const isDimmed = getDimmedState(node, highlightedSubsystem, searchTerm, graph, selectedNodeId, connectedNodeIds);
-
-            flowNodes.push({
-                id: node.id,
-                type: 'moduleNode',
-                position: {
-                    x: baseX + col * nodeSpacingX,
-                    y: baseY + row * nodeSpacingY,
-                },
-                data: {
-                    label: node.label,
-                    fullPath: node.id,
-                    language: (node.metadata.language as string) || '',
-                    symbolCount: node.symbols.length,
-                    subsystemColor: subsystem?.color || '',
-                    dimmed: isDimmed,
-                },
-                selected: false,
-            });
-        }
-        groupIndex++;
-    }
-
-    // Build edges
     for (const edge of graph.edges) {
-        const isConnectedToSelected = selectedNodeId
-            ? (edge.source === selectedNodeId || edge.target === selectedNodeId)
-            : null;
-
-        const isHighlighted = selectedNodeId
-            ? isConnectedToSelected!
-            : !!(
-                highlightedSubsystem === null ||
-                graph.subsystems.find(s => s.id === highlightedSubsystem)?.nodeIds.includes(edge.source) ||
-                graph.subsystems.find(s => s.id === highlightedSubsystem)?.nodeIds.includes(edge.target)
-            );
-
-        const edgeOpacity = selectedNodeId
-            ? (isConnectedToSelected ? 0.9 : 0.08)
-            : (isHighlighted ? 0.8 : 0.3);
-
-        flowEdges.push({
+        rawEdges.push({
             id: edge.id,
             source: edge.source,
             target: edge.target,
             type: 'smoothstep',
-            animated: selectedNodeId ? !!isConnectedToSelected : false,
+            animated: false,
             style: {
-                stroke: isHighlighted ? 'var(--accent)' : 'var(--border)',
-                strokeWidth: isHighlighted ? 2 : 1,
-                opacity: edgeOpacity,
+                stroke: 'var(--border)',
+                strokeWidth: 1,
+                opacity: 0.5,
             },
             markerEnd: {
                 type: MarkerType.ArrowClosed,
                 width: 12,
                 height: 12,
-                color: isHighlighted ? 'var(--accent)' : 'var(--border)',
+                color: 'var(--border)',
             },
         });
     }
 
-    return { flowNodes, flowEdges };
+    return { rawNodes, rawEdges };
 }
 
 function getDimmedState(
@@ -301,11 +370,16 @@ function getDimmedState(
     highlightedSubsystem: string | null,
     searchTerm: string,
     graph: ArchitectureGraph,
-    selectedNodeId: string | null,
-    connectedNodeIds: Set<string>
+    selectedNodeId: string | null
 ): boolean {
     if (selectedNodeId) {
-        return !connectedNodeIds.has(node.id);
+        if (node.id === selectedNodeId) return false;
+        const connected = graph.edges.some(
+            e =>
+                (e.source === selectedNodeId && e.target === node.id) ||
+                (e.target === selectedNodeId && e.source === node.id)
+        );
+        return !connected;
     }
     if (searchTerm) {
         return !node.id.toLowerCase().includes(searchTerm.toLowerCase());
