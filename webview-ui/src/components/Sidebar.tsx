@@ -19,7 +19,32 @@ export function Sidebar({
     return (
         <div className="sidebar">
             <div className="sidebar-header">
-                <h2>Architecture</h2>
+                {/* HEADER */}
+                <h2>
+                    {window.CODEARCY_ICON_URI && (
+                        <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: 28,
+                            height: 28,
+                            borderRadius: '50%',
+                            background: '#fff',
+                            marginRight: 8,
+                            flexShrink: 0,
+                            verticalAlign: 'middle',
+                        }}>
+                            <img
+                                src={window.CODEARCY_ICON_URI}
+                                alt="CodeArchy"
+                                style={{ width: 20, height: 20, borderRadius: '50%', display: 'block' }}
+                            />
+                        </span>
+                    )}
+                    CodeArchy
+                </h2>
+
+                {/* SEARCH */}
                 <input
                     type="text"
                     className="search-input"
@@ -28,6 +53,8 @@ export function Sidebar({
                     onChange={(e) => onSearchChange(e.target.value)}
                 />
             </div>
+
+            {/* SUBSYSTEM LIST */}
             <div className="subsystem-list">
                 {!graph || graph.subsystems.length === 0 ? (
                     <div className="empty-state">
@@ -54,6 +81,8 @@ export function Sidebar({
                     ))
                 )}
             </div>
+
+            {/* STATS */}
             {graph && (
                 <div className="stats">
                     <div>{graph.metadata.fileCount} files analyzed</div>

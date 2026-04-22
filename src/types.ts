@@ -123,6 +123,9 @@ export enum WebviewMessageType {
     ChatChunk = 'chatChunk',
     ChatThinking = 'chatThinking',
     ClearChat = 'clearChat',
+    // Voice input
+    VoiceInputAudio = 'voiceInputAudio',
+    VoiceTranscript = 'voiceTranscript',
 }
 
 export interface AnalysisProgress {

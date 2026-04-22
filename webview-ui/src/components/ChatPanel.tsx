@@ -15,13 +15,15 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const [isThinking, setIsThinking] = useState(false);
     const [thinkingText, setThinkingText] = useState('');
     const [isRecording, setIsRecording] = useState(false);
+    const [isTranscribing, setIsTranscribing] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
-    const recognitionRef = useRef<SpeechRecognition | null>(null);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const autoSpeakOnNextReplyRef = useRef(false);
     const isAtBottomRef = useRef(true);
 
     // Auto-scroll only when the user is at/near the bottom.
@@ -41,6 +43,18 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         if (!container) return;
         isAtBottomRef.current =
             container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    }, []);
+
+    const speakNow = useCallback((text: string) => {
+        if (!text.trim()) return;
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        utterance.onend = () => setIsSpeaking(false);
+        utterance.onerror = () => setIsSpeaking(false);
+        setIsSpeaking(true);
+        window.speechSynthesis.speak(utterance);
     }, []);
 
     // Listen for chat responses
@@ -77,6 +91,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     setIsThinking(false);
                     setThinkingText('');
                     if (response.error) {
+                        autoSpeakOnNextReplyRef.current = false;
                         setError(response.error);
                         setIsStreaming(false);
                         return;
@@ -100,6 +115,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         ];
                     });
                     setIsStreaming(false);
+                    if (autoSpeakOnNextReplyRef.current) {
+                        autoSpeakOnNextReplyRef.current = false;
+                        speakNow(response.content);
+                    }
                     break;
                 }
                 case 'chatThinking': {
@@ -115,11 +134,39 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     setThinkingText('');
                     break;
                 }
+                case 'voiceTranscript': {
+                    const vt = msg.payload as { transcript?: string; error?: string };
+                    setIsTranscribing(false);
+                    if (vt.error) {
+                        setError(vt.error);
+                    } else if (vt.transcript?.trim()) {
+                        const transcript = vt.transcript.trim();
+                        autoSpeakOnNextReplyRef.current = true;
+
+                        const userMsg: ChatMessage = {
+                            role: 'user',
+                            content: transcript,
+                            timestamp: Date.now(),
+                        };
+                        setMessages((prev) => [...prev, userMsg]);
+                        setInput('');
+                        setIsStreaming(true);
+                        setIsThinking(true);
+                        setThinkingText('');
+                        setError(null);
+                        isAtBottomRef.current = true;
+
+                        postMessage('chatMessage', { content: transcript });
+                    } else {
+                        setError('No speech detected. Please try again.');
+                    }
+                    break;
+                }
             }
         };
         window.addEventListener('message', handler);
         return () => window.removeEventListener('message', handler);
-    }, []);
+    }, [speakNow]);
 
     const sendMessage = useCallback(
         (text: string) => {
@@ -156,47 +203,92 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         postMessage('clearChat');
     };
 
-    // --- Audio: Voice Input ---
-    const toggleRecording = useCallback(() => {
+    // --- Audio: Voice Input via Webview Browser Audio API ---
+    // Browser permission prompt comes from getUserMedia() in this webview.
+    const toggleRecording = useCallback(async () => {
         if (isRecording) {
-            recognitionRef.current?.stop();
+            mediaRecorderRef.current?.stop();
             setIsRecording(false);
             return;
         }
 
-        const SpeechRecognitionAPI =
-            (window as unknown as Record<string, unknown>).SpeechRecognition ||
-            (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
-
-        if (!SpeechRecognitionAPI) {
-            setError('Speech recognition is not supported in this environment.');
+        if (!navigator.mediaDevices?.getUserMedia) {
+            setError('Microphone access is not available in this environment.');
             return;
         }
 
-        const recognition = new (SpeechRecognitionAPI as new () => SpeechRecognition)();
-        recognition.continuous = false;
-        recognition.interimResults = false;
-        recognition.lang = 'en-US';
-
-        recognition.onresult = (event: SpeechRecognitionEvent) => {
-            const transcript = event.results[0]?.[0]?.transcript;
-            if (transcript) {
-                setInput((prev) => prev + transcript);
+        try {
+            if (navigator.permissions?.query) {
+                const micPermission = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+                if (micPermission.state === 'denied') {
+                    setError('Microphone permission is denied. Please allow microphone access and try again.');
+                    return;
+                }
             }
-            setIsRecording(false);
+        } catch {
+            // Some webview environments do not expose the permissions API.
+        }
+
+        let stream: MediaStream;
+        try {
+            // Triggers browser/OS permission popup on first access.
+            stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                },
+            });
+        } catch (err) {
+            const name = (err as DOMException)?.name || '';
+            if (name === 'NotAllowedError' || name === 'SecurityError') {
+                setError('Microphone permission was denied. Please allow access and try again.');
+            } else if (name === 'NotFoundError') {
+                setError('No microphone was found on this device.');
+            } else if (name === 'NotReadableError') {
+                setError('Microphone is in use by another application.');
+            } else {
+                setError(`Could not access microphone: ${(err as Error)?.message || name || 'unknown error'}`);
+            }
+            return;
+        }
+
+        const chunks: BlobPart[] = [];
+        const recorder = new MediaRecorder(stream);
+
+        recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) chunks.push(e.data);
         };
 
-        recognition.onerror = () => {
+        recorder.onstop = () => {
             setIsRecording(false);
+            stream.getTracks().forEach((t) => t.stop());
+            if (chunks.length === 0) {
+                setError('No audio was captured. Please try again.');
+                return;
+            }
+
+            setIsTranscribing(true);
+            const blob = new Blob(chunks, { type: recorder.mimeType });
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const dataUrl = reader.result as string;
+                const base64 = dataUrl.split(',')[1];
+                postMessage('voiceInputAudio', { audio: base64, mimeType: recorder.mimeType });
+            };
+            reader.readAsDataURL(blob);
         };
 
-        recognition.onend = () => {
+        recorder.onerror = () => {
+            stream.getTracks().forEach((t) => t.stop());
             setIsRecording(false);
+            setError('Recording failed. Please try again.');
         };
 
-        recognitionRef.current = recognition;
-        recognition.start();
+        mediaRecorderRef.current = recorder;
+        recorder.start();
         setIsRecording(true);
+        setError(null);
     }, [isRecording]);
 
     // --- Audio: Text-to-Speech ---
@@ -208,15 +300,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 return;
             }
 
-            const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = 1;
-            utterance.pitch = 1;
-            utterance.onend = () => setIsSpeaking(false);
-            utterance.onerror = () => setIsSpeaking(false);
-            setIsSpeaking(true);
-            window.speechSynthesis.speak(utterance);
+            speakNow(text);
         },
-        [isSpeaking]
+        [isSpeaking, speakNow]
     );
 
     if (!isOpen) {
@@ -352,12 +438,15 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 />
                 <div className="chat-input-actions">
                     <button
-                        className={`chat-voice-btn ${isRecording ? 'recording' : ''}`}
+                        className={`chat-voice-btn ${isRecording ? 'recording' : ''} ${isTranscribing ? 'transcribing' : ''}`}
                         onClick={toggleRecording}
-                        title={isRecording ? 'Stop recording' : 'Voice input'}
-                        disabled={isStreaming}
+                        title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing…' : 'Voice input'}
+                        disabled={isStreaming || isTranscribing}
                     >
-                        <Icon name={isRecording ? 'stopAction' : 'voiceInput'} />
+                        {isTranscribing
+                            ? <Icon name="spinner" spin />
+                            : <Icon name={isRecording ? 'stopAction' : 'voiceInput'} />
+                        }
                     </button>
                     <button
                         className="chat-send-btn"
