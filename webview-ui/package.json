@@ -13,6 +13,7 @@
         "@xyflow/react": "^12.4.0",
         "cytoscape": "^3.30.0",
         "cytoscape-dagre": "^2.5.0",
+        "elkjs": "^0.11.1",
         "react": "^18.3.0",
         "react-dom": "^18.3.0"
     },

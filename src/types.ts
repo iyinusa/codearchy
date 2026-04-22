@@ -123,6 +123,11 @@ export enum WebviewMessageType {
     ChatChunk = 'chatChunk',
     ChatThinking = 'chatThinking',
     ClearChat = 'clearChat',
+    // Voice input (extension-host capture)
+    StartVoiceRecording = 'startVoiceRecording',
+    StopVoiceRecording = 'stopVoiceRecording',
+    VoiceRecordingState = 'voiceRecordingState',
+    VoiceTranscript = 'voiceTranscript',
 }
 
 export interface AnalysisProgress {

@@ -1,5 +1,5 @@
 import * as http from 'http';
-import { ArchitectureGraph, GraphNode, GraphEdge } from '../types';
+import { ArchitectureGraph } from '../types';
 
 export interface OllamaModelInfo {
     name: string;
@@ -118,7 +118,7 @@ export class OllamaService {
     ): Promise<SystemArchitecture> {
         const prompt = this.buildArchitecturePrompt(graph);
 
-        const fullResponse = await this.generate(modelTag, prompt, onChunk);
+        const fullResponse = await this.generate(modelTag, prompt, 0.0, onChunk);
 
         return this.parseArchitectureResponse(fullResponse, graph);
     }
@@ -154,6 +154,86 @@ export class OllamaService {
         });
 
         return response;
+    }
+
+    /** Transcribe user-recorded audio using local Ollama + Gemma. */
+    async transcribeAudio(audioBase64: string, mimeType: string, modelTag: string): Promise<string> {
+        const format = this.getAudioFormatFromMime(mimeType);
+        const prompt =
+            'Transcribe the user speech from this audio. Return only the transcript text. ' +
+            'Do not add labels, explanations, or markdown.';
+
+        // Try multiple payload schemas to support evolving Ollama multimodal APIs.
+        const attempts: Array<Record<string, unknown>> = [
+            {
+                model: modelTag,
+                stream: false,
+                messages: [
+                    {
+                        role: 'user',
+                        content: [
+                            { type: 'text', text: prompt },
+                            {
+                                type: 'input_audio',
+                                input_audio: {
+                                    data: audioBase64,
+                                    format,
+                                },
+                            },
+                        ],
+                    },
+                ],
+                options: {
+                    temperature: 0,
+                },
+            },
+            {
+                model: modelTag,
+                stream: false,
+                messages: [
+                    {
+                        role: 'user',
+                        content: prompt,
+                        audio: [audioBase64],
+                    },
+                ],
+                options: {
+                    temperature: 0,
+                },
+            },
+            {
+                model: modelTag,
+                stream: false,
+                messages: [
+                    {
+                        role: 'user',
+                        content: prompt,
+                        audios: [audioBase64],
+                    },
+                ],
+                options: {
+                    temperature: 0,
+                },
+            },
+        ];
+
+        let lastErr: Error | null = null;
+        for (const body of attempts) {
+            try {
+                const raw = await this.httpPost('/api/chat', JSON.stringify(body), 120000);
+                const transcript = this.extractTranscriptFromChatResponse(raw);
+                if (transcript) {
+                    return transcript;
+                }
+                lastErr = new Error('Model returned an empty transcript.');
+            } catch (err) {
+                lastErr = err instanceof Error ? err : new Error(String(err));
+            }
+        }
+
+        throw new Error(
+            `Audio transcription via Ollama failed. ${lastErr?.message || 'No supported audio schema worked.'}`
+        );
     }
 
     /** Set the architecture context for chat conversations */
@@ -261,6 +341,7 @@ GUIDELINES:
     private async generate(
         model: string,
         prompt: string,
+        temperature = 0.3,
         onChunk?: (text: string) => void
     ): Promise<string> {
         return new Promise((resolve, reject) => {
@@ -269,7 +350,7 @@ GUIDELINES:
                 prompt,
                 stream: true,
                 options: {
-                    temperature: 0.3,
+                    temperature: temperature,
                     num_predict: 4096,
                 },
             });
@@ -478,6 +559,91 @@ GUIDELINES:
             });
             req.end();
         });
+    }
+
+    private httpPost(pathName: string, body: string, timeoutMs: number): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const url = new URL(`${OLLAMA_BASE}${pathName}`);
+            const options: http.RequestOptions = {
+                hostname: url.hostname,
+                port: url.port,
+                path: url.pathname,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(body),
+                },
+                timeout: timeoutMs,
+            };
+
+            const req = http.request(options, (res) => {
+                let data = '';
+                res.setEncoding('utf-8');
+                res.on('data', (chunk: string) => { data += chunk; });
+                res.on('end', () => {
+                    if (res.statusCode !== 200) {
+                        reject(new Error(`Ollama returned status ${res.statusCode}: ${data}`));
+                        return;
+                    }
+                    resolve(data);
+                });
+                res.on('error', reject);
+            });
+
+            req.on('error', (err) => {
+                reject(new Error(`Cannot connect to Ollama: ${err.message}`));
+            });
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error('Ollama request timed out'));
+            });
+
+            req.write(body);
+            req.end();
+        });
+    }
+
+    private getAudioFormatFromMime(mimeType: string): string {
+        if (mimeType.includes('wav')) return 'wav';
+        if (mimeType.includes('mp4') || mimeType.includes('m4a')) return 'm4a';
+        if (mimeType.includes('mpeg') || mimeType.includes('mp3')) return 'mp3';
+        if (mimeType.includes('ogg')) return 'ogg';
+        return 'webm';
+    }
+
+    private extractTranscriptFromChatResponse(raw: string): string {
+        const parsed = JSON.parse(raw);
+        if (parsed.error) {
+            throw new Error(String(parsed.error));
+        }
+
+        const content = typeof parsed?.message?.content === 'string'
+            ? parsed.message.content.trim()
+            : '';
+
+        if (!content) return '';
+
+        // Sometimes models wrap output in JSON or labels despite instructions.
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            try {
+                const json = JSON.parse(jsonMatch[0]);
+                if (typeof json.transcript === 'string') {
+                    return json.transcript.trim();
+                }
+                if (typeof json.text === 'string') {
+                    return json.text.trim();
+                }
+            } catch {
+                // fall through to raw cleanup
+            }
+        }
+
+        return content
+            .replace(/^```(?:text|json)?\s*/i, '')
+            .replace(/```$/i, '')
+            .replace(/^transcript\s*:\s*/i, '')
+            .trim();
     }
 
     // --- Response Parsing ---

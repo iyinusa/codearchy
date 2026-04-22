@@ -15,13 +15,14 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const [isThinking, setIsThinking] = useState(false);
     const [thinkingText, setThinkingText] = useState('');
     const [isRecording, setIsRecording] = useState(false);
+    const [isTranscribing, setIsTranscribing] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
-    const recognitionRef = useRef<SpeechRecognition | null>(null);
+    const autoSpeakOnNextReplyRef = useRef(false);
     const isAtBottomRef = useRef(true);
 
     // Auto-scroll only when the user is at/near the bottom.
@@ -41,6 +42,18 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         if (!container) return;
         isAtBottomRef.current =
             container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    }, []);
+
+    const speakNow = useCallback((text: string) => {
+        if (!text.trim()) return;
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        utterance.onend = () => setIsSpeaking(false);
+        utterance.onerror = () => setIsSpeaking(false);
+        setIsSpeaking(true);
+        window.speechSynthesis.speak(utterance);
     }, []);
 
     // Listen for chat responses
@@ -77,6 +90,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     setIsThinking(false);
                     setThinkingText('');
                     if (response.error) {
+                        autoSpeakOnNextReplyRef.current = false;
                         setError(response.error);
                         setIsStreaming(false);
                         return;
@@ -100,6 +114,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         ];
                     });
                     setIsStreaming(false);
+                    if (autoSpeakOnNextReplyRef.current) {
+                        autoSpeakOnNextReplyRef.current = false;
+                        speakNow(response.content);
+                    }
                     break;
                 }
                 case 'chatThinking': {
@@ -115,11 +133,56 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     setThinkingText('');
                     break;
                 }
+                case 'voiceRecordingState': {
+                    const s = msg.payload as { state: 'recording' | 'transcribing' | 'error'; error?: string; recorder?: string };
+                    if (s.state === 'recording') {
+                        setIsRecording(true);
+                        setIsTranscribing(false);
+                        setError(null);
+                    } else if (s.state === 'transcribing') {
+                        setIsRecording(false);
+                        setIsTranscribing(true);
+                    } else if (s.state === 'error') {
+                        setIsRecording(false);
+                        setIsTranscribing(false);
+                        setError(s.error || 'Voice recording failed.');
+                    }
+                    break;
+                }
+                case 'voiceTranscript': {
+                    const vt = msg.payload as { transcript?: string; error?: string };
+                    setIsTranscribing(false);
+                    setIsRecording(false);
+                    if (vt.error) {
+                        setError(vt.error);
+                    } else if (vt.transcript?.trim()) {
+                        const transcript = vt.transcript.trim();
+                        autoSpeakOnNextReplyRef.current = true;
+
+                        const userMsg: ChatMessage = {
+                            role: 'user',
+                            content: transcript,
+                            timestamp: Date.now(),
+                        };
+                        setMessages((prev) => [...prev, userMsg]);
+                        setInput('');
+                        setIsStreaming(true);
+                        setIsThinking(true);
+                        setThinkingText('');
+                        setError(null);
+                        isAtBottomRef.current = true;
+
+                        postMessage('chatMessage', { content: transcript });
+                    } else {
+                        setError('No speech detected. Please try again.');
+                    }
+                    break;
+                }
             }
         };
         window.addEventListener('message', handler);
         return () => window.removeEventListener('message', handler);
-    }, []);
+    }, [speakNow]);
 
     const sendMessage = useCallback(
         (text: string) => {
@@ -156,47 +219,20 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         postMessage('clearChat');
     };
 
-    // --- Audio: Voice Input ---
+    // --- Audio: Voice Input via Extension Host ---
+    // Webview iframes do not grant microphone permission, so capture runs in
+    // the extension host using a native CLI recorder (sox/ffmpeg/arecord).
+    // The webview only sends start/stop messages and listens for state updates.
     const toggleRecording = useCallback(() => {
         if (isRecording) {
-            recognitionRef.current?.stop();
-            setIsRecording(false);
+            postMessage('stopVoiceRecording');
+            // Keep isRecording=true until the host confirms 'transcribing';
+            // this avoids a flash back to the idle icon between stop and the
+            // spinner. The voiceRecordingState handler clears it.
             return;
         }
-
-        const SpeechRecognitionAPI =
-            (window as unknown as Record<string, unknown>).SpeechRecognition ||
-            (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
-
-        if (!SpeechRecognitionAPI) {
-            setError('Speech recognition is not supported in this environment.');
-            return;
-        }
-
-        const recognition = new (SpeechRecognitionAPI as new () => SpeechRecognition)();
-        recognition.continuous = false;
-        recognition.interimResults = false;
-        recognition.lang = 'en-US';
-
-        recognition.onresult = (event: SpeechRecognitionEvent) => {
-            const transcript = event.results[0]?.[0]?.transcript;
-            if (transcript) {
-                setInput((prev) => prev + transcript);
-            }
-            setIsRecording(false);
-        };
-
-        recognition.onerror = () => {
-            setIsRecording(false);
-        };
-
-        recognition.onend = () => {
-            setIsRecording(false);
-        };
-
-        recognitionRef.current = recognition;
-        recognition.start();
-        setIsRecording(true);
+        setError(null);
+        postMessage('startVoiceRecording');
     }, [isRecording]);
 
     // --- Audio: Text-to-Speech ---
@@ -208,15 +244,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 return;
             }
 
-            const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = 1;
-            utterance.pitch = 1;
-            utterance.onend = () => setIsSpeaking(false);
-            utterance.onerror = () => setIsSpeaking(false);
-            setIsSpeaking(true);
-            window.speechSynthesis.speak(utterance);
+            speakNow(text);
         },
-        [isSpeaking]
+        [isSpeaking, speakNow]
     );
 
     if (!isOpen) {
@@ -352,12 +382,15 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 />
                 <div className="chat-input-actions">
                     <button
-                        className={`chat-voice-btn ${isRecording ? 'recording' : ''}`}
+                        className={`chat-voice-btn ${isRecording ? 'recording' : ''} ${isTranscribing ? 'transcribing' : ''}`}
                         onClick={toggleRecording}
-                        title={isRecording ? 'Stop recording' : 'Voice input'}
-                        disabled={isStreaming}
+                        title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing…' : 'Voice input'}
+                        disabled={isStreaming || isTranscribing}
                     >
-                        <Icon name={isRecording ? 'stopAction' : 'voiceInput'} />
+                        {isTranscribing
+                            ? <Icon name="spinner" spin />
+                            : <Icon name={isRecording ? 'stopAction' : 'voiceInput'} />
+                        }
                     </button>
                     <button
                         className="chat-send-btn"
