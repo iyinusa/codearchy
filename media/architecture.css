@@ -713,7 +713,7 @@ body {
     z-index: 1;
     width: 100%;
     height: 100%;
-    padding: 16px 20px;
+    padding: 20px 28px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -724,7 +724,7 @@ body {
 
 /* Shape-specific inner padding tweaks so text never touches silhouette edges */
 .system-node.shape-database .system-node-inner {
-    padding: 24px 24px;
+    padding: 24px 28px;
 }
 
 .system-node.shape-cache .system-node-inner {

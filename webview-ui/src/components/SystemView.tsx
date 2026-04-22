@@ -1,4 +1,12 @@
-import React, { useMemo, useCallback, useEffect, useState } from 'react';
+import React, {
+    useMemo,
+    useCallback,
+    useEffect,
+    useState,
+    forwardRef,
+    useImperativeHandle,
+    useRef,
+} from 'react';
 import {
     ReactFlow,
     Background,
@@ -22,6 +30,14 @@ import type { SystemArchitecture } from '../types';
 import { Icon } from './Icons';
 import type { AppIconName } from './Icons';
 import { layoutWithElk, estimateNodeSize } from './elkLayout';
+import { buildFlowSvg, svgToPngBase64 } from './exportSvg';
+
+/** Imperative handle exposed to parents for view-aware export (keeps ELK
+ *  layout + routed edges so PNG/SVG match what's on screen). */
+export interface SystemViewHandle {
+    exportSVG(): string | null;
+    exportPNG(): Promise<string | null>;
+}
 
 interface SystemViewProps {
     architecture: SystemArchitecture;
@@ -304,7 +320,11 @@ const nodeTypes: NodeTypes = {
     systemNode: SystemNode,
 };
 
-function SystemViewInner({ architecture, showMiniMap }: SystemViewProps) {
+function SystemViewInner({
+    architecture,
+    showMiniMap,
+    forwardedRef,
+}: SystemViewProps & { forwardedRef?: React.Ref<SystemViewHandle> }) {
     const { rawNodes, rawEdges } = useMemo(
         () => buildRawSystemElements(architecture),
         [architecture]
@@ -412,6 +432,69 @@ function SystemViewInner({ architecture, showMiniMap }: SystemViewProps) {
         setSelectedId(null);
     }, []);
 
+    // Refs track the latest laid-out data so the export handle always reflects
+    // the current diagram (ELK positions, routed edges) instead of a stale
+    // naive grid.
+    const nodesRef = useRef<Node[]>([]);
+    const edgesRef = useRef<Edge[]>([]);
+    const archRef = useRef<SystemArchitecture>(architecture);
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+    archRef.current = architecture;
+
+    useImperativeHandle(
+        forwardedRef,
+        () => ({
+            exportSVG(): string | null {
+                const laidOut = nodesRef.current;
+                if (!laidOut.length) return null;
+                const arch = archRef.current;
+                const edgeColors: Record<string, string> = {
+                    'dependency': '#90A4AE',
+                    'data-flow': '#4FC3F7',
+                    'api-call': '#FFB74D',
+                    'event': '#BA68C8',
+                };
+                const labelByEdgeId = new Map(arch.edges.map(e => [e.id, e.label]));
+                const typeByEdgeId = new Map(arch.edges.map(e => [e.id, e.type]));
+                return buildFlowSvg(laidOut, edgesRef.current, {
+                    banner: arch.pattern,
+                    getNodeVisual: node => {
+                        const data = node.data as {
+                            label: string;
+                            description?: string;
+                            color: string;
+                            nodeType?: string;
+                        };
+                        return {
+                            title: data.label,
+                            subtitle: data.description,
+                            caption: data.nodeType,
+                            color: data.color,
+                            variant: 'system',
+                        };
+                    },
+                    getEdgeVisual: edge => {
+                        const type = typeByEdgeId.get(edge.id) || '';
+                        return {
+                            color: edgeColors[type] ?? '#888',
+                            strokeWidth: 1.8,
+                            label: labelByEdgeId.get(edge.id),
+                        };
+                    },
+                });
+            },
+            exportPNG(): Promise<string | null> {
+                const svg = this.exportSVG();
+                if (!svg) return Promise.resolve(null);
+                return new Promise(resolve => {
+                    svgToPngBase64(svg, base64 => resolve(base64));
+                });
+            },
+        }),
+        []
+    );
+
     return (
         <div className="system-view-container">
             <div className="system-view-banner">
@@ -460,13 +543,13 @@ function SystemViewInner({ architecture, showMiniMap }: SystemViewProps) {
     );
 }
 
-export function SystemView(props: SystemViewProps) {
+export const SystemView = forwardRef<SystemViewHandle, SystemViewProps>(function SystemView(props, ref) {
     return (
         <ReactFlowProvider>
-            <SystemViewInner {...props} />
+            <SystemViewInner {...props} forwardedRef={ref} />
         </ReactFlowProvider>
     );
-}
+});
 
 function pickDirection(nodeCount: number, edgeCount: number): 'DOWN' | 'RIGHT' {
     const density = nodeCount > 0 ? edgeCount / nodeCount : 0;

@@ -1,4 +1,12 @@
-import React, { useMemo, useCallback, useEffect, useState } from 'react';
+import React, {
+    useMemo,
+    useCallback,
+    useEffect,
+    useState,
+    forwardRef,
+    useImperativeHandle,
+    useRef,
+} from 'react';
 import {
     ReactFlow,
     Background,
@@ -20,6 +28,15 @@ import {
 import '@xyflow/react/dist/style.css';
 import type { ArchitectureGraph, GraphNode } from '../types';
 import { layoutWithElk, estimateNodeSize } from './elkLayout';
+import { buildFlowSvg, svgToPngBase64 } from './exportSvg';
+
+/** Imperative handle exposed to parents so they can export exactly what is on
+ *  screen (ELK-laid-out nodes + routed edges) rather than re-running a naive
+ *  grid layout that produces a spaghetti diagram. */
+export interface ReactFlowViewHandle {
+    exportSVG(): string | null;
+    exportPNG(): Promise<string | null>;
+}
 
 interface ReactFlowViewProps {
     graph: ArchitectureGraph;
@@ -95,7 +112,8 @@ function ReactFlowViewInner({
     onNodeSelect,
     onNavigateToFile,
     showMiniMap,
-}: ReactFlowViewProps) {
+    forwardedRef,
+}: ReactFlowViewProps & { forwardedRef?: React.Ref<ReactFlowViewHandle> }) {
     // Build raw (unpositioned) elements from the graph structure only.
     // Cosmetic state (dim / highlight / selection) is applied separately to
     // avoid re-running the expensive auto-layout on every UI interaction.
@@ -236,6 +254,60 @@ function ReactFlowViewInner({
         onNodeSelect(null);
     }, [onNodeSelect]);
 
+    // Keep refs to the latest laid-out nodes/edges so the imperative export
+    // handle always sees the current diagram (not a stale closure).
+    const nodesRef = useRef<Node[]>([]);
+    const edgesRef = useRef<Edge[]>([]);
+    const graphRef = useRef<ArchitectureGraph>(graph);
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+    graphRef.current = graph;
+
+    useImperativeHandle(
+        forwardedRef,
+        () => ({
+            exportSVG(): string | null {
+                const g = graphRef.current;
+                const laidOut = nodesRef.current;
+                if (!laidOut.length) return null;
+                return buildFlowSvg(laidOut, edgesRef.current, {
+                    groups: g.subsystems.map(s => ({
+                        id: s.id,
+                        name: s.name,
+                        color: s.color,
+                        nodeIds: s.nodeIds,
+                    })),
+                    getNodeVisual: node => {
+                        const data = node.data as {
+                            label: string;
+                            language?: string;
+                            symbolCount?: number;
+                            subsystemColor?: string;
+                        };
+                        const subtitle = data.language
+                            ? `${data.language} · ${data.symbolCount ?? 0} symbols`
+                            : `${data.symbolCount ?? 0} symbols`;
+                        return {
+                            title: data.label,
+                            subtitle,
+                            color: data.subsystemColor || '#454545',
+                            variant: 'module',
+                        };
+                    },
+                    getEdgeVisual: () => ({ color: '#6b7280', strokeWidth: 1.2 }),
+                });
+            },
+            exportPNG(): Promise<string | null> {
+                const svg = this.exportSVG();
+                if (!svg) return Promise.resolve(null);
+                return new Promise(resolve => {
+                    svgToPngBase64(svg, base64 => resolve(base64));
+                });
+            },
+        }),
+        []
+    );
+
     return (
         <div className="reactflow-container">
             {isLayouting && (
@@ -279,13 +351,15 @@ function ReactFlowViewInner({
     );
 }
 
-export function ReactFlowView(props: ReactFlowViewProps) {
-    return (
-        <ReactFlowProvider>
-            <ReactFlowViewInner {...props} />
-        </ReactFlowProvider>
-    );
-}
+export const ReactFlowView = forwardRef<ReactFlowViewHandle, ReactFlowViewProps>(
+    function ReactFlowView(props, ref) {
+        return (
+            <ReactFlowProvider>
+                <ReactFlowViewInner {...props} forwardedRef={ref} />
+            </ReactFlowProvider>
+        );
+    }
+);
 
 function buildRawFlowElements(
     graph: ArchitectureGraph

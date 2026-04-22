@@ -118,7 +118,7 @@ export class OllamaService {
     ): Promise<SystemArchitecture> {
         const prompt = this.buildArchitecturePrompt(graph);
 
-        const fullResponse = await this.generate(modelTag, prompt, onChunk);
+        const fullResponse = await this.generate(modelTag, prompt, 0.0, onChunk);
 
         return this.parseArchitectureResponse(fullResponse, graph);
     }
@@ -261,6 +261,7 @@ GUIDELINES:
     private async generate(
         model: string,
         prompt: string,
+        temperature = 0.3,
         onChunk?: (text: string) => void
     ): Promise<string> {
         return new Promise((resolve, reject) => {
@@ -269,7 +270,7 @@ GUIDELINES:
                 prompt,
                 stream: true,
                 options: {
-                    temperature: 0.3,
+                    temperature: temperature,
                     num_predict: 4096,
                 },
             });
