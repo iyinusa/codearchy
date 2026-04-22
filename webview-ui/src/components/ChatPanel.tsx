@@ -22,7 +22,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const autoSpeakOnNextReplyRef = useRef(false);
     const isAtBottomRef = useRef(true);
 
@@ -134,9 +133,26 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     setThinkingText('');
                     break;
                 }
+                case 'voiceRecordingState': {
+                    const s = msg.payload as { state: 'recording' | 'transcribing' | 'error'; error?: string; recorder?: string };
+                    if (s.state === 'recording') {
+                        setIsRecording(true);
+                        setIsTranscribing(false);
+                        setError(null);
+                    } else if (s.state === 'transcribing') {
+                        setIsRecording(false);
+                        setIsTranscribing(true);
+                    } else if (s.state === 'error') {
+                        setIsRecording(false);
+                        setIsTranscribing(false);
+                        setError(s.error || 'Voice recording failed.');
+                    }
+                    break;
+                }
                 case 'voiceTranscript': {
                     const vt = msg.payload as { transcript?: string; error?: string };
                     setIsTranscribing(false);
+                    setIsRecording(false);
                     if (vt.error) {
                         setError(vt.error);
                     } else if (vt.transcript?.trim()) {
@@ -203,92 +219,20 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         postMessage('clearChat');
     };
 
-    // --- Audio: Voice Input via Webview Browser Audio API ---
-    // Browser permission prompt comes from getUserMedia() in this webview.
-    const toggleRecording = useCallback(async () => {
+    // --- Audio: Voice Input via Extension Host ---
+    // Webview iframes do not grant microphone permission, so capture runs in
+    // the extension host using a native CLI recorder (sox/ffmpeg/arecord).
+    // The webview only sends start/stop messages and listens for state updates.
+    const toggleRecording = useCallback(() => {
         if (isRecording) {
-            mediaRecorderRef.current?.stop();
-            setIsRecording(false);
+            postMessage('stopVoiceRecording');
+            // Keep isRecording=true until the host confirms 'transcribing';
+            // this avoids a flash back to the idle icon between stop and the
+            // spinner. The voiceRecordingState handler clears it.
             return;
         }
-
-        if (!navigator.mediaDevices?.getUserMedia) {
-            setError('Microphone access is not available in this environment.');
-            return;
-        }
-
-        try {
-            if (navigator.permissions?.query) {
-                const micPermission = await navigator.permissions.query({ name: 'microphone' as PermissionName });
-                if (micPermission.state === 'denied') {
-                    setError('Microphone permission is denied. Please allow microphone access and try again.');
-                    return;
-                }
-            }
-        } catch {
-            // Some webview environments do not expose the permissions API.
-        }
-
-        let stream: MediaStream;
-        try {
-            // Triggers browser/OS permission popup on first access.
-            stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
-                },
-            });
-        } catch (err) {
-            const name = (err as DOMException)?.name || '';
-            if (name === 'NotAllowedError' || name === 'SecurityError') {
-                setError('Microphone permission was denied. Please allow access and try again.');
-            } else if (name === 'NotFoundError') {
-                setError('No microphone was found on this device.');
-            } else if (name === 'NotReadableError') {
-                setError('Microphone is in use by another application.');
-            } else {
-                setError(`Could not access microphone: ${(err as Error)?.message || name || 'unknown error'}`);
-            }
-            return;
-        }
-
-        const chunks: BlobPart[] = [];
-        const recorder = new MediaRecorder(stream);
-
-        recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) chunks.push(e.data);
-        };
-
-        recorder.onstop = () => {
-            setIsRecording(false);
-            stream.getTracks().forEach((t) => t.stop());
-            if (chunks.length === 0) {
-                setError('No audio was captured. Please try again.');
-                return;
-            }
-
-            setIsTranscribing(true);
-            const blob = new Blob(chunks, { type: recorder.mimeType });
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const dataUrl = reader.result as string;
-                const base64 = dataUrl.split(',')[1];
-                postMessage('voiceInputAudio', { audio: base64, mimeType: recorder.mimeType });
-            };
-            reader.readAsDataURL(blob);
-        };
-
-        recorder.onerror = () => {
-            stream.getTracks().forEach((t) => t.stop());
-            setIsRecording(false);
-            setError('Recording failed. Please try again.');
-        };
-
-        mediaRecorderRef.current = recorder;
-        recorder.start();
-        setIsRecording(true);
         setError(null);
+        postMessage('startVoiceRecording');
     }, [isRecording]);
 
     // --- Audio: Text-to-Speech ---

@@ -123,8 +123,10 @@ export enum WebviewMessageType {
     ChatChunk = 'chatChunk',
     ChatThinking = 'chatThinking',
     ClearChat = 'clearChat',
-    // Voice input
-    VoiceInputAudio = 'voiceInputAudio',
+    // Voice input (extension-host capture)
+    StartVoiceRecording = 'startVoiceRecording',
+    StopVoiceRecording = 'stopVoiceRecording',
+    VoiceRecordingState = 'voiceRecordingState',
     VoiceTranscript = 'voiceTranscript',
 }
 

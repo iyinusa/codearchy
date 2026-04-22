@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { ArchitectureGraph, WebviewMessage, WebviewMessageType } from '../types';
 import { OllamaService, MODEL_OPTIONS, SystemArchitecture } from '../inference/OllamaService';
+import { HostAudioRecorder } from '../audio/HostAudioRecorder';
 
 export class ArchitecturePanel {
   private static instance: ArchitecturePanel | undefined;
@@ -12,6 +13,7 @@ export class ArchitecturePanel {
   private currentGraph: ArchitectureGraph | undefined;
   private ollamaService: OllamaService;
   private selectedModel: string | null = null;
+  private hostRecorder: HostAudioRecorder = new HostAudioRecorder();
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
     this.panel = panel;
@@ -159,24 +161,78 @@ export class ArchitecturePanel {
         this.ollamaService.clearConversation();
         break;
 
-      case WebviewMessageType.VoiceInputAudio: {
-        const audioPayload = message.payload as { audio: string; mimeType: string };
-        this.handleVoiceInput(audioPayload);
+      case WebviewMessageType.StartVoiceRecording:
+        this.handleStartVoiceRecording();
         break;
-      }
+
+      case WebviewMessageType.StopVoiceRecording:
+        this.handleStopVoiceRecording();
+        break;
     }
   }
 
   // --- Voice Input Handler ---
 
-  private async handleVoiceInput(payload: { audio: string; mimeType: string }) {
+  private async handleStartVoiceRecording() {
+    // Pre-flight: ensure a model is selected so transcription will succeed later.
+    const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
+    if (!modelOpt) {
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.VoiceRecordingState,
+        payload: {
+          state: 'error',
+          error: 'No AI model selected. Select Gemma 4 E2B or E4B to use voice input.',
+        },
+      });
+      return;
+    }
+
+    try {
+      const recorder = await this.hostRecorder.start();
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.VoiceRecordingState,
+        payload: { state: 'recording', recorder: recorder.kind },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.VoiceRecordingState,
+        payload: { state: 'error', error: msg },
+      });
+    }
+  }
+
+  private async handleStopVoiceRecording() {
+    if (!this.hostRecorder.isRecording()) {
+      return;
+    }
+
+    let audio: string;
+    let mimeType: string;
+    try {
+      const result = await this.hostRecorder.stop();
+      audio = result.audio;
+      mimeType = result.mimeType;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.VoiceRecordingState,
+        payload: { state: 'error', error: `Recording failed: ${msg}` },
+      });
+      return;
+    }
+
+    // Signal transcribing state so the UI can show a spinner.
+    this.panel.webview.postMessage({
+      type: WebviewMessageType.VoiceRecordingState,
+      payload: { state: 'transcribing' },
+    });
+
     const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
     if (!modelOpt) {
       this.panel.webview.postMessage({
         type: WebviewMessageType.VoiceTranscript,
-        payload: {
-          error: 'No AI model selected. Select Gemma 4 E2B or E4B to use voice input.',
-        },
+        payload: { error: 'No AI model selected.' },
       });
       return;
     }
@@ -191,18 +247,12 @@ export class ArchitecturePanel {
         return;
       }
 
-      const transcript = await this.ollamaService.transcribeAudio(
-        payload.audio,
-        payload.mimeType,
-        modelOpt.ollamaTag
-      );
+      const transcript = await this.ollamaService.transcribeAudio(audio, mimeType, modelOpt.ollamaTag);
 
       if (!transcript.trim()) {
         this.panel.webview.postMessage({
           type: WebviewMessageType.VoiceTranscript,
-          payload: {
-            error: 'No speech could be transcribed from the recorded audio.',
-          },
+          payload: { error: 'No speech could be transcribed from the recorded audio.' },
         });
         return;
       }
@@ -481,6 +531,7 @@ export class ArchitecturePanel {
 
   private dispose() {
     ArchitecturePanel.instance = undefined;
+    this.hostRecorder.cancel();
     this.panel.dispose();
     while (this.disposables.length) {
       const d = this.disposables.pop();
@@ -515,7 +566,7 @@ export class ArchitecturePanel {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: blob:; font-src data:; media-src ${webview.cspSource} blob: mediastream:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: blob:; font-src data:;">
   <title>CodeArchy Architecture</title>
   <link rel="stylesheet" href="${cssUri}">
   <link rel="stylesheet" href="${baseStylesUri}">
