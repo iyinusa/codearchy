@@ -15,6 +15,7 @@ import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import {
     setProjectId,
+    getProjectId,
     upsertProject,
     loadSystemRecord,
     saveSystemArchitecture,
@@ -101,8 +102,11 @@ export function App() {
                     setArchProgress('');
                     setViewMode('system');
                     // Persist the freshly generated architecture so it survives
-                    // webview reloads and workspace reopenings.
-                    const projectId = (graph ?? null)?.metadata?.projectId;
+                    // webview reloads and workspace reopenings. We read the id
+                    // from the project-context singleton — reading from the
+                    // `graph` closure would capture a stale null because this
+                    // handler is registered once with empty deps.
+                    const projectId = getProjectId();
                     if (projectId) {
                         saveSystemArchitecture(projectId, arch).catch(e =>
                             console.error('[CodeArchy] failed to save system arch', e),
