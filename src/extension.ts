@@ -2,11 +2,13 @@ import * as vscode from 'vscode';
 import { ArchitecturePanel } from './webview/ArchitecturePanel';
 import { AnalysisPipeline } from './pipeline/AnalysisPipeline';
 import { ModulesTreeProvider } from './views/ModulesTreeProvider';
+import { CommandsTreeProvider } from './views/CommandsTreeProvider';
 import { ArchitectureGraph } from './types';
 
 let currentGraph: ArchitectureGraph | undefined;
 let pipeline: AnalysisPipeline | undefined;
 let modulesTreeProvider: ModulesTreeProvider;
+let commandsTreeProvider: CommandsTreeProvider;
 
 export function activate(context: vscode.ExtensionContext) {
     pipeline = new AnalysisPipeline(context.extensionPath);
@@ -14,6 +16,15 @@ export function activate(context: vscode.ExtensionContext) {
         // Tree-sitter init failed; regex fallback will be used
     });
     modulesTreeProvider = new ModulesTreeProvider();
+
+    const extensionVersion =
+        (context.extension?.packageJSON?.version as string | undefined) ?? '0.0.0';
+    commandsTreeProvider = new CommandsTreeProvider(extensionVersion);
+
+    const commandsView = vscode.window.createTreeView('codearchy.commandsView', {
+        treeDataProvider: commandsTreeProvider,
+        showCollapseAll: false,
+    });
 
     const treeView = vscode.window.createTreeView('codearchy.modulesView', {
         treeDataProvider: modulesTreeProvider,
@@ -63,6 +74,23 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
+    const openSidebarCmd = vscode.commands.registerCommand(
+        'codearchy.openSidebar',
+        async () => {
+            await vscode.commands.executeCommand('workbench.view.extension.codearch-explorer');
+        }
+    );
+
+    // Status bar entry: clickable CodeArchy branding that opens the sidebar.
+    const statusBarItem = vscode.window.createStatusBarItem(
+        vscode.StatusBarAlignment.Left,
+        100
+    );
+    statusBarItem.text = '$(type-hierarchy) CodeArchy';
+    statusBarItem.tooltip = 'Open CodeArchy — offline architecture visualizer';
+    statusBarItem.command = 'codearchy.openSidebar';
+    statusBarItem.show();
+
     const onSaveWatcher = vscode.workspace.onDidSaveTextDocument(async (doc) => {
         if (pipeline && currentGraph) {
             const updated = await pipeline.handleFileChange(doc.uri, currentGraph);
@@ -75,12 +103,15 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     context.subscriptions.push(
+        commandsView,
         treeView,
+        statusBarItem,
         showArchitectureCmd,
         analyzeWorkspaceCmd,
         refreshViewCmd,
         exportSVGCmd,
         exportPNGCmd,
+        openSidebarCmd,
         onSaveWatcher
     );
 }

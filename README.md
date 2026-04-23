@@ -19,16 +19,16 @@ CodeArchy is an open-source offline-first privacy AI system that turns codebases
 ## Quick Start
 
 1. Open a project in VS Code
-2. Run **CodeArchy: Show Architecture View** from the Command Palette (`Cmd+Shift+P`)
+2. Run **CodeArchy: Show Architecture** from the Command Palette (`Cmd+Shift+P`)
 3. Explore the interactive dependency graph
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `CodeArchy: Show Architecture View` | Open the architecture visualization |
+| `CodeArchy: Show Architecture` | Open the architecture visualization |
 | `CodeArchy: Analyze Workspace` | Run a full workspace analysis |
-| `CodeArchy: Refresh Architecture View` | Re-analyze and update the view |
+| `CodeArchy: Refresh Architecture` | Re-analyze and update the view |
 
 ## Configuration
 

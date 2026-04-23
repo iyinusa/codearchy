@@ -62,6 +62,7 @@ export class ArchitecturePanel {
     );
 
     ArchitecturePanel.instance = new ArchitecturePanel(panel, extensionUri);
+    ArchitecturePanel.instance.panel.iconPath = new vscode.ThemeIcon('type-hierarchy');
     ArchitecturePanel.instance.panel.webview.html = ArchitecturePanel.instance.getWebviewContent();
     ArchitecturePanel.instance.currentGraph = graph;
   }

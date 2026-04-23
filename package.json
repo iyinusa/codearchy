@@ -2,8 +2,8 @@
     "name": "codearchy",
     "displayName": "CodeArchy",
     "description": "offline-first privacy AI system that visualizes codebase into explainable system architecture for education, onboarding, and safer software development/maintenance",
-    "version": "0.1.0",
-    "publisher": "codearchy",
+    "version": "1.0.0",
+    "publisher": "Kennedy Yinusa",
     "license": "MIT",
     "repository": {
         "type": "git",
@@ -19,9 +19,9 @@
     "keywords": [
         "architecture",
         "visualization",
-        "dependency-graph",
-        "code-analysis",
-        "tree-sitter"
+        "education",
+        "AI",
+        "Chat"
     ],
     "activationEvents": [],
     "main": "./out/extension.js",
@@ -29,8 +29,8 @@
         "commands": [
             {
                 "command": "codearchy.showArchitecture",
-                "title": "CodeArchy: Show Architecture View",
-                "icon": "$(graph)"
+                "title": "CodeArchy: Show Architecture",
+                "icon": "$(type-hierarchy)"
             },
             {
                 "command": "codearchy.analyzeWorkspace",
@@ -38,7 +38,7 @@
             },
             {
                 "command": "codearchy.refreshView",
-                "title": "CodeArchy: Refresh Architecture View",
+                "title": "CodeArchy: Refresh Architecture",
                 "icon": "$(refresh)"
             },
             {
@@ -48,6 +48,10 @@
             {
                 "command": "codearchy.exportPNG",
                 "title": "CodeArchy: Export as PNG"
+            },
+            {
+                "command": "codearchy.openSidebar",
+                "title": "CodeArchy: Open Sidebar"
             }
         ],
         "viewsContainers": {
@@ -62,8 +66,14 @@
         "views": {
             "codearch-explorer": [
                 {
+                    "id": "codearchy.commandsView",
+                    "name": "CodeArchy",
+                    "icon": "media/icon.png"
+                },
+                {
                     "id": "codearchy.modulesView",
-                    "name": "Modules"
+                    "name": "Modules",
+                    "icon": "media/icon.png"
                 }
             ]
         },

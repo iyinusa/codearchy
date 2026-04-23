@@ -270,7 +270,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 12px;
+    padding: 12px;
     border-bottom: 1px solid var(--border);
     background: var(--sidebar-bg);
     z-index: 10;
@@ -279,15 +279,15 @@ body {
 
 .toolbar-group {
     display: flex;
-    gap: 4px;
+    /* gap: 4px; */
 }
 
 .toolbar-btn {
     background: var(--node-bg);
     border: 1px solid var(--node-border);
     color: var(--fg);
-    padding: 3px 10px;
-    border-radius: 4px;
+    padding: 5px 15px;
+    /* border-radius: 4px; */
     cursor: pointer;
     font-size: 12px;
     display: flex;
