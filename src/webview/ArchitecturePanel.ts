@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ArchitectureGraph, WebviewMessage, WebviewMessageType } from '../types';
-import { OllamaService, MODEL_OPTIONS, SystemArchitecture } from '../inference/OllamaService';
+import { OllamaService, MODEL_OPTIONS, SystemArchitecture, ProcessingMode } from '../inference/OllamaService';
 import { HostAudioRecorder } from '../audio/HostAudioRecorder';
 
 export class ArchitecturePanel {
@@ -13,6 +13,7 @@ export class ArchitecturePanel {
   private currentGraph: ArchitectureGraph | undefined;
   private ollamaService: OllamaService;
   private selectedModel: string | null = null;
+  private processingMode: ProcessingMode = 'moderate';
   private hostRecorder: HostAudioRecorder = new HostAudioRecorder();
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
@@ -26,6 +27,7 @@ export class ArchitecturePanel {
     if (aiModel !== 'none') {
       this.selectedModel = aiModel;
     }
+    this.processingMode = config.get<ProcessingMode>('aiProcessing', 'moderate');
 
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
@@ -99,6 +101,14 @@ export class ArchitecturePanel {
         if (this.currentGraph) {
           this.sendGraphData(this.currentGraph);
         }
+        // Send the persisted processing mode so the Sidebar reflects it.
+        this.panel.webview.postMessage({
+          type: WebviewMessageType.SetProcessingMode,
+          payload: { mode: this.processingMode },
+        });
+        // Pre-load the model into Ollama memory so the first user-triggered
+        // call doesn't pay the cold-start tax. Best-effort; failures are silent.
+        this.warmUpSelectedModel();
         break;
 
       case WebviewMessageType.NavigateToFile: {
@@ -145,6 +155,20 @@ export class ArchitecturePanel {
         this.handleModelSelection(modelPayload.modelId);
         break;
       }
+
+      case WebviewMessageType.SetProcessingMode: {
+        const payload = message.payload as { mode: ProcessingMode };
+        if (payload && (payload.mode === 'fast' || payload.mode === 'moderate' || payload.mode === 'indepth')) {
+          this.processingMode = payload.mode;
+          const config = vscode.workspace.getConfiguration('codearchy');
+          config.update('aiProcessing', payload.mode, vscode.ConfigurationTarget.Workspace);
+        }
+        break;
+      }
+
+      case WebviewMessageType.WarmUpModel:
+        this.warmUpSelectedModel();
+        break;
 
       case WebviewMessageType.GenerateSystemArch:
         this.handleGenerateSystemArch();
@@ -314,6 +338,15 @@ export class ArchitecturePanel {
     // Send updated status
     this.handleModelStatusRequest();
     vscode.window.showInformationMessage(`CodeArchy: AI model set to ${modelId}`);
+    // Warm up the newly selected model immediately.
+    this.warmUpSelectedModel();
+  }
+
+  /** Fire-and-forget pre-load so the model is resident before the first call. */
+  private warmUpSelectedModel(): void {
+    const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
+    if (!modelOpt) return;
+    void this.ollamaService.warmUp(modelOpt.ollamaTag, this.processingMode);
   }
 
   private async handleGenerateSystemArch() {
@@ -369,12 +402,16 @@ export class ArchitecturePanel {
       const architecture = await this.ollamaService.generateSystemArchitecture(
         this.currentGraph,
         modelOpt.ollamaTag,
-        (_chunk) => {
+        (chunk) => {
+          // Stream the raw model output so the user sees progress instead of
+          // a static "Generating..." message. Perceived latency is half the
+          // battle when waiting on a local LLM.
           this.panel.webview.postMessage({
-            type: WebviewMessageType.SystemArchProgress,
-            payload: { message: `Generating architecture... (streaming)` },
+            type: WebviewMessageType.SystemArchStream,
+            payload: { chunk },
           });
-        }
+        },
+        this.processingMode
       );
 
       this.panel.webview.postMessage({
@@ -472,7 +509,7 @@ export class ArchitecturePanel {
       }
 
       // Set architecture context for chat
-      this.ollamaService.setArchitectureContext(this.currentGraph);
+      this.ollamaService.setArchitectureContext(this.currentGraph, this.processingMode);
 
       const response = await this.ollamaService.chat(
         content,
@@ -488,7 +525,8 @@ export class ArchitecturePanel {
             type: WebviewMessageType.ChatThinking,
             payload: { content: thinkChunk },
           });
-        }
+        },
+        this.processingMode
       );
 
       this.panel.webview.postMessage({

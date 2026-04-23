@@ -156,6 +156,106 @@ body {
     line-height: 1.6;
 }
 
+/* AI Processing toggle (Sidebar) */
+.ai-processing {
+    padding: 8px 12px 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ai-processing-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    opacity: 0.65;
+    font-weight: 600;
+}
+
+.ai-processing-toggle {
+    display: flex;
+    border: 1px solid var(--node-border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--node-bg);
+}
+
+.ai-processing-btn {
+    flex: 1;
+    padding: 4px 6px;
+    background: transparent;
+    color: var(--fg);
+    border: none;
+    border-right: 1px solid var(--node-border);
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0.75;
+    transition: background 0.12s ease, opacity 0.12s ease;
+}
+
+.ai-processing-btn:last-child {
+    border-right: none;
+}
+
+.ai-processing-btn:hover {
+    background: rgba(255, 255, 255, 0.04);
+    opacity: 1;
+}
+
+.ai-processing-btn.active {
+    background: var(--accent);
+    color: #fff;
+    opacity: 1;
+    font-weight: 600;
+}
+
+/* Live raw model output during architecture generation */
+.arch-stream {
+    margin-top: 16px;
+    width: min(720px, 90%);
+    max-height: 280px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--node-bg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.arch-stream-header {
+    padding: 4px 10px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    opacity: 0.65;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.arch-stream-body {
+    margin: 0;
+    padding: 8px 10px;
+    font-family: var(--vscode-editor-font-family, 'Menlo', monospace);
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    flex: 1;
+    color: var(--fg);
+    opacity: 0.85;
+}
+
+.arch-stream-body::-webkit-scrollbar {
+    width: 6px;
+}
+
+.arch-stream-body::-webkit-scrollbar-thumb {
+    background: var(--scrollbar);
+    border-radius: 3px;
+}
+
 /* Main content */
 .main-content {
     flex: 1;
@@ -733,7 +833,7 @@ body {
 }
 
 .system-node.shape-gateway .system-node-inner {
-    padding: 18px 32px;
+    padding: 18px 32px 18px 40px;
     /* text-align: center; */
 }
 
@@ -748,16 +848,16 @@ body {
 }
 
 .system-node.shape-auth .system-node-inner {
-    padding: 18px 22px 26px;
+    padding: 18px 22px 26px 32px;
     /* text-align: center; */
 }
 
 .system-node.shape-ui .system-node-inner {
-    padding: 16px 18px 24px;
+    padding: 16px 18px 24px 22px;
 }
 
 .system-node.shape-worker .system-node-inner {
-    padding: 20px 32px;
+    padding: 20px 36px;
 }
 
 /* Center the header row when the inner block is centered */

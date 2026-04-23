@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ArchitectureGraph } from '../types';
+import type { ArchitectureGraph, ProcessingMode } from '../types';
 
 interface SidebarProps {
     graph: ArchitectureGraph | null;
@@ -7,7 +7,15 @@ interface SidebarProps {
     onSearchChange: (term: string) => void;
     highlightedSubsystem: string | null;
     onSubsystemHighlight: (id: string | null) => void;
+    processingMode: ProcessingMode;
+    onProcessingModeChange: (mode: ProcessingMode) => void;
 }
+
+const PROCESSING_MODES: Array<{ id: ProcessingMode; label: string; hint: string }> = [
+    { id: 'fast', label: 'Fast', hint: 'Smallest prompt, lowest token budget — fastest responses.' },
+    { id: 'moderate', label: 'Moderate', hint: 'Balanced prompt size and depth (default).' },
+    { id: 'indepth', label: 'In-depth', hint: 'Largest prompt, full reasoning with thinking tokens — slowest, deepest analysis.' },
+];
 
 export function Sidebar({
     graph,
@@ -15,6 +23,8 @@ export function Sidebar({
     onSearchChange,
     highlightedSubsystem,
     onSubsystemHighlight,
+    processingMode,
+    onProcessingModeChange,
 }: SidebarProps) {
     return (
         <div className="sidebar">
@@ -91,6 +101,28 @@ export function Sidebar({
                     <div>{graph.metadata.languages.join(', ')}</div>
                 </div>
             )}
+
+            {/* AI PROCESSING */}
+            <div className="ai-processing">
+                <div className="ai-processing-label" title="Controls prompt size, token budget, and reasoning depth for the local AI.">
+                    AI Processing
+                </div>
+                <div className="ai-processing-toggle" role="radiogroup" aria-label="AI Processing tier">
+                    {PROCESSING_MODES.map((m) => (
+                        <button
+                            key={m.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={processingMode === m.id}
+                            className={`ai-processing-btn ${processingMode === m.id ? 'active' : ''}`}
+                            onClick={() => onProcessingModeChange(m.id)}
+                            title={m.hint}
+                        >
+                            {m.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
         </div>
     );
 }

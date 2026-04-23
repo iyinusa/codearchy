@@ -1,7 +1,7 @@
 {
     "name": "codearchy",
     "displayName": "CodeArchy",
-    "description": "Offline-first VS Code extension to visualize codebases as high-level architectural structures using Tree-sitter parsing and local AI inference.",
+    "description": "offline-first privacy AI system that visualizes codebase into explainable system architecture for education, onboarding, and safer software development/maintenance",
     "version": "0.1.0",
     "publisher": "codearchy",
     "license": "MIT",
@@ -116,6 +116,21 @@
                     ],
                     "default": "none",
                     "description": "Local AI model for architecture inference. 'none' uses heuristic grouping."
+                },
+                "codearchy.aiProcessing": {
+                    "type": "string",
+                    "enum": [
+                        "fast",
+                        "moderate",
+                        "indepth"
+                    ],
+                    "enumDescriptions": [
+                        "Smallest prompt, lowest token budget — fastest responses.",
+                        "Balanced prompt size and depth (default).",
+                        "Largest prompt, full reasoning with thinking tokens — slowest, deepest analysis."
+                    ],
+                    "default": "moderate",
+                    "description": "AI processing tier. Trades response speed for analytical depth."
                 }
             }
         }

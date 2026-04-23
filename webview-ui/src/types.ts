@@ -57,6 +57,8 @@ export interface ArchitectureGraph {
 
 export type ViewMode = 'system' | 'reactflow' | 'cytoscape';
 
+export type ProcessingMode = 'fast' | 'moderate' | 'indepth';
+
 export interface WebviewMessage {
     type: string;
     payload: unknown;

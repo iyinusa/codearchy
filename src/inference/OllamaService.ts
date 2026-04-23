@@ -71,6 +71,82 @@ export interface ChatMessage {
     timestamp: number;
 }
 
+/**
+ * AI processing tier — trades response speed against analytical depth.
+ * The user picks one of these from the Sidebar; the host applies the matching
+ * profile to every Ollama call so prompt length, num_predict, num_ctx and
+ * thinking-token usage scale together.
+ */
+export type ProcessingMode = 'fast' | 'moderate' | 'indepth';
+
+interface ProcessingProfile {
+    /** Hard cap on response tokens — biggest single driver of latency. */
+    numPredict: number;
+    /** Context window. Larger = slower prefill but more codebase fits. */
+    numCtx: number;
+    topK: number;
+    topP: number;
+    /** How many modules to enumerate per subsystem in the architecture prompt. */
+    maxModulesPerSubsystem: number;
+    /** Symbol names per module (0 = omit symbol identifiers entirely). */
+    maxSymbolNames: number;
+    /** Cap on edges included in the codebase summary. */
+    maxEdges: number;
+    /** Conversation turns kept in the chat context window. */
+    maxChatHistory: number;
+    /** Whether to enable Gemma's hidden "thinking" tokens (slower, deeper). */
+    think: boolean;
+    /** How long Ollama keeps the model resident after a call. */
+    keepAlive: string;
+    temperature: number;
+}
+
+const PROCESSING_PROFILES: Record<ProcessingMode, ProcessingProfile> = {
+    fast: {
+        numPredict: 512,
+        numCtx: 2048,
+        topK: 20,
+        topP: 0.9,
+        maxModulesPerSubsystem: 0,
+        maxSymbolNames: 0,
+        maxEdges: 15,
+        maxChatHistory: 4,
+        think: false,
+        keepAlive: '30m',
+        temperature: 0.2,
+    },
+    moderate: {
+        numPredict: 1024,
+        numCtx: 4096,
+        topK: 40,
+        topP: 0.95,
+        maxModulesPerSubsystem: 5,
+        maxSymbolNames: 0,
+        maxEdges: 30,
+        maxChatHistory: 6,
+        think: false,
+        keepAlive: '30m',
+        temperature: 0.1,
+    },
+    indepth: {
+        numPredict: 4096,
+        numCtx: 8192,
+        topK: 40,
+        topP: 0.95,
+        maxModulesPerSubsystem: 15,
+        maxSymbolNames: 5,
+        maxEdges: 80,
+        maxChatHistory: 10,
+        think: true,
+        keepAlive: '30m',
+        temperature: 0.0,
+    },
+};
+
+export function getProcessingProfile(mode: ProcessingMode): Readonly<ProcessingProfile> {
+    return PROCESSING_PROFILES[mode] ?? PROCESSING_PROFILES.moderate;
+}
+
 const OLLAMA_BASE = 'http://localhost:11434';
 
 export class OllamaService {
@@ -114,11 +190,13 @@ export class OllamaService {
     async generateSystemArchitecture(
         graph: ArchitectureGraph,
         modelTag: string,
-        onChunk?: (text: string) => void
+        onChunk?: (text: string) => void,
+        mode: ProcessingMode = 'moderate'
     ): Promise<SystemArchitecture> {
-        const prompt = this.buildArchitecturePrompt(graph);
+        const profile = getProcessingProfile(mode);
+        const prompt = this.buildArchitecturePrompt(graph, profile);
 
-        const fullResponse = await this.generate(modelTag, prompt, 0.0, onChunk);
+        const fullResponse = await this.generate(modelTag, prompt, profile, onChunk);
 
         return this.parseArchitectureResponse(fullResponse, graph);
     }
@@ -128,8 +206,11 @@ export class OllamaService {
         message: string,
         modelTag: string,
         onChunk?: (text: string) => void,
-        onThinkChunk?: (text: string) => void
+        onThinkChunk?: (text: string) => void,
+        mode: ProcessingMode = 'moderate'
     ): Promise<string> {
+        const profile = getProcessingProfile(mode);
+
         this.conversationHistory.push({
             role: 'user',
             content: message,
@@ -139,13 +220,13 @@ export class OllamaService {
         const systemPrompt = this.buildChatSystemPrompt();
         const messages = [
             { role: 'system', content: systemPrompt },
-            ...this.conversationHistory.slice(-10).map((m) => ({
+            ...this.conversationHistory.slice(-profile.maxChatHistory).map((m) => ({
                 role: m.role,
                 content: m.content,
             })),
         ];
 
-        const response = await this.chatCompletion(modelTag, messages, onChunk, onThinkChunk);
+        const response = await this.chatCompletion(modelTag, messages, profile, onChunk, onThinkChunk);
 
         this.conversationHistory.push({
             role: 'assistant',
@@ -154,6 +235,30 @@ export class OllamaService {
         });
 
         return response;
+    }
+
+    /**
+     * Pre-load the model into memory so the first real call doesn't pay the
+     * 2–10 s cold-start cost. Sends a single-token request and asks Ollama to
+     * keep the model resident for `keep_alive`. Safe to call repeatedly.
+     */
+    async warmUp(modelTag: string, mode: ProcessingMode = 'moderate'): Promise<void> {
+        const profile = getProcessingProfile(mode);
+        const body = JSON.stringify({
+            model: modelTag,
+            prompt: 'ok',
+            stream: false,
+            keep_alive: profile.keepAlive,
+            options: {
+                num_predict: 1,
+                temperature: 0,
+            },
+        });
+        try {
+            await this.httpPost('/api/generate', body, 60000);
+        } catch {
+            // Warm-up is best-effort — never surface errors to the UI.
+        }
     }
 
     /** Transcribe user-recorded audio using local Ollama + Gemma. */
@@ -237,8 +342,8 @@ export class OllamaService {
     }
 
     /** Set the architecture context for chat conversations */
-    setArchitectureContext(graph: ArchitectureGraph): void {
-        this.architectureContext = this.summarizeGraph(graph);
+    setArchitectureContext(graph: ArchitectureGraph, mode: ProcessingMode = 'moderate'): void {
+        this.architectureContext = this.summarizeGraph(graph, getProcessingProfile(mode));
     }
 
     /** Clear conversation history */
@@ -263,8 +368,8 @@ export class OllamaService {
 
     // --- Prompt Construction ---
 
-    private buildArchitecturePrompt(graph: ArchitectureGraph): string {
-        const treeSummary = this.summarizeGraph(graph);
+    private buildArchitecturePrompt(graph: ArchitectureGraph, profile: ProcessingProfile): string {
+        const treeSummary = this.summarizeGraph(graph, profile);
 
         return `You are a senior software architect. Analyze the following codebase structure and produce a high-level system architecture diagram.
 
@@ -316,32 +421,60 @@ GUIDELINES:
 - If asked about code specifics you don't have, say so honestly.`;
     }
 
-    private summarizeGraph(graph: ArchitectureGraph): string {
+    private summarizeGraph(graph: ArchitectureGraph, profile: ProcessingProfile): string {
         const lines: string[] = [];
+        const { maxModulesPerSubsystem, maxSymbolNames, maxEdges } = profile;
 
         lines.push(`Files: ${graph.metadata.fileCount} | Symbols: ${graph.metadata.totalSymbols} | Languages: ${graph.metadata.languages.join(', ')}`);
         lines.push('');
 
-        // Group by subsystem
+        // Group by subsystem — at the lowest tier we only emit subsystem names
+        // and module counts, which is enough for the model to infer high-level
+        // groupings without burning prefill tokens on file paths.
         for (const sub of graph.subsystems) {
             lines.push(`## ${sub.name} (${sub.nodeIds.length} modules)`);
+            if (maxModulesPerSubsystem <= 0) continue;
+
             const subNodes = graph.nodes.filter((n) => sub.nodeIds.includes(n.id));
-            for (const node of subNodes.slice(0, 15)) {
-                const symbolNames = node.symbols.slice(0, 5).map((s) => s.name).join(', ');
-                lines.push(`  - ${node.id}: ${node.symbols.length} symbols [${symbolNames}]`);
+            for (const node of subNodes.slice(0, maxModulesPerSubsystem)) {
+                if (maxSymbolNames > 0) {
+                    const symbolNames = node.symbols.slice(0, maxSymbolNames).map((s) => s.name).join(', ');
+                    lines.push(`  - ${node.id}: ${node.symbols.length} symbols [${symbolNames}]`);
+                } else {
+                    lines.push(`  - ${node.id} (${node.symbols.length} symbols)`);
+                }
             }
-            if (subNodes.length > 15) {
-                lines.push(`  ... and ${subNodes.length - 15} more modules`);
+            if (subNodes.length > maxModulesPerSubsystem) {
+                lines.push(`  ... and ${subNodes.length - maxModulesPerSubsystem} more modules`);
             }
         }
 
-        lines.push('');
-        lines.push('## Dependencies:');
-        for (const edge of graph.edges.slice(0, 50)) {
-            lines.push(`  ${edge.source} → ${edge.target}`);
+        // Aggregate file-level edges into subsystem-to-subsystem edges. This
+        // collapses tens of thousands of imports into a handful of meaningful
+        // dependencies — the only thing the architect-level prompt needs.
+        const nodeToSub = new Map<string, string>();
+        for (const sub of graph.subsystems) {
+            for (const id of sub.nodeIds) nodeToSub.set(id, sub.name);
         }
-        if (graph.edges.length > 50) {
-            lines.push(`  ... and ${graph.edges.length - 50} more dependencies`);
+        const subEdgeCounts = new Map<string, number>();
+        for (const edge of graph.edges) {
+            const s = nodeToSub.get(edge.source);
+            const t = nodeToSub.get(edge.target);
+            if (!s || !t || s === t) continue;
+            const key = `${s} → ${t}`;
+            subEdgeCounts.set(key, (subEdgeCounts.get(key) || 0) + 1);
+        }
+        const sortedEdges = [...subEdgeCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, maxEdges);
+
+        lines.push('');
+        lines.push('## Subsystem Dependencies:');
+        for (const [key, count] of sortedEdges) {
+            lines.push(`  ${key} (${count} refs)`);
+        }
+        if (subEdgeCounts.size > maxEdges) {
+            lines.push(`  ... and ${subEdgeCounts.size - maxEdges} more`);
         }
 
         return lines.join('\n');
@@ -352,7 +485,7 @@ GUIDELINES:
     private async generate(
         model: string,
         prompt: string,
-        temperature = 0.3,
+        profile: ProcessingProfile,
         onChunk?: (text: string) => void
     ): Promise<string> {
         return new Promise((resolve, reject) => {
@@ -360,9 +493,13 @@ GUIDELINES:
                 model,
                 prompt,
                 stream: true,
+                keep_alive: profile.keepAlive,
                 options: {
-                    temperature: temperature,
-                    num_predict: 4096,
+                    temperature: profile.temperature,
+                    num_predict: profile.numPredict,
+                    num_ctx: profile.numCtx,
+                    top_k: profile.topK,
+                    top_p: profile.topP,
                 },
             });
 
@@ -447,6 +584,7 @@ GUIDELINES:
     private async chatCompletion(
         model: string,
         messages: Array<{ role: string; content: string }>,
+        profile: ProcessingProfile,
         onChunk?: (text: string) => void,
         onThinkChunk?: (text: string) => void
     ): Promise<string> {
@@ -455,10 +593,14 @@ GUIDELINES:
                 model,
                 messages,
                 stream: true,
-                think: true,
+                think: profile.think,
+                keep_alive: profile.keepAlive,
                 options: {
-                    temperature: 0.5,
-                    num_predict: 2048,
+                    temperature: Math.max(profile.temperature, 0.0),
+                    num_predict: profile.numPredict,
+                    num_ctx: profile.numCtx,
+                    top_k: profile.topK,
+                    top_p: profile.topP,
                 },
             });
 
