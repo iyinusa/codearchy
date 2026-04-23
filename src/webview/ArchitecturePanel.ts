@@ -47,7 +47,7 @@ export class ArchitecturePanel {
 
     const panel = vscode.window.createWebviewPanel(
       'codearchArchitecture',
-      'CodeArchy: Architecture',
+      'CodeArchy: Explainable Architecture',
       column,
       {
         enableScripts: true,
