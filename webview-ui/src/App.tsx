@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ArchitectureGraph, ViewMode, SystemArchitecture } from './types';
+import { ArchitectureGraph, ViewMode, SystemArchitecture, ProcessingMode } from './types';
 import { postMessage } from './vscode';
 import { ReactFlowView } from './components/ReactFlowView';
 import type { ReactFlowViewHandle } from './components/ReactFlowView';
@@ -32,7 +32,11 @@ export function App() {
     const [systemArch, setSystemArch] = useState<SystemArchitecture | null>(null);
     const [isGeneratingArch, setIsGeneratingArch] = useState(false);
     const [archProgress, setArchProgress] = useState<string>('');
+    /** Raw model output streamed during architecture generation. Shown to the
+     *  user as a live transcript so long waits feel responsive. */
+    const [archStream, setArchStream] = useState<string>('');
     const [chatOpen, setChatOpen] = useState(false);
+    const [processingMode, setProcessingMode] = useState<ProcessingMode>('moderate');
     const mainContentRef = useRef<HTMLDivElement>(null);
     const cytoscapeRef = useRef<CytoscapeViewHandle>(null);
     const reactFlowRef = useRef<ReactFlowViewHandle>(null);
@@ -100,6 +104,7 @@ export function App() {
                     setSystemArch(arch);
                     setIsGeneratingArch(false);
                     setArchProgress('');
+                    setArchStream('');
                     setViewMode('system');
                     // Persist the freshly generated architecture so it survives
                     // webview reloads and workspace reopenings. We read the id
@@ -119,10 +124,25 @@ export function App() {
                     setArchProgress(prog.message);
                     break;
                 }
+                case 'systemArchStream': {
+                    const payload = message.payload as { chunk: string };
+                    if (payload?.chunk) {
+                        setArchStream(prev => prev + payload.chunk);
+                    }
+                    break;
+                }
+                case 'setProcessingMode': {
+                    const payload = message.payload as { mode: ProcessingMode };
+                    if (payload?.mode) {
+                        setProcessingMode(payload.mode);
+                    }
+                    break;
+                }
                 case 'error': {
                     const err = message.payload as { message: string };
                     setIsGeneratingArch(false);
                     setArchProgress('');
+                    setArchStream('');
                     // Error shown via chat or inline
                     console.error('CodeArchy error:', err.message);
                     break;
@@ -208,8 +228,14 @@ export function App() {
         if (isGeneratingArch) return;
         setIsGeneratingArch(true);
         setArchProgress('Preparing architecture analysis...');
+        setArchStream('');
         postMessage('generateSystemArch');
     }, [isGeneratingArch]);
+
+    const handleProcessingModeChange = useCallback((mode: ProcessingMode) => {
+        setProcessingMode(mode);
+        postMessage('setProcessingMode', { mode });
+    }, []);
 
     const selectedNode = graph?.nodes.find(n => n.id === selectedNodeId) ?? null;
 
@@ -221,6 +247,8 @@ export function App() {
                 onSearchChange={setSearchTerm}
                 highlightedSubsystem={highlightedSubsystem}
                 onSubsystemHighlight={handleSubsystemHighlight}
+                processingMode={processingMode}
+                onProcessingModeChange={handleProcessingModeChange}
             />
             <div className="main-content" ref={mainContentRef}>
                 <Toolbar
@@ -251,6 +279,12 @@ export function App() {
                                 <strong>Generating System Architecture</strong>
                                 <span className="loading-sub">{archProgress}</span>
                             </div>
+                            {archStream && (
+                                <div className="arch-stream" aria-live="polite">
+                                    <div className="arch-stream-header">Live model output</div>
+                                    <pre className="arch-stream-body">{archStream}</pre>
+                                </div>
+                            )}
                         </div>
                     ) : (
                         <div className="loading">

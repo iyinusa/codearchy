@@ -123,6 +123,11 @@ export enum WebviewMessageType {
     GenerateSystemArch = 'generateSystemArch',
     SystemArchData = 'systemArchData',
     SystemArchProgress = 'systemArchProgress',
+    /** Host → webview: raw model output streamed token-by-token while the
+     *  architecture is being generated. Surfaces progress to the user. */
+    SystemArchStream = 'systemArchStream',
+    /** Webview → host: switch the AI processing tier (fast/moderate/indepth). */
+    SetProcessingMode = 'setProcessingMode',
     // Chat / Conversation
     ChatMessage = 'chatMessage',
     ChatResponse = 'chatResponse',
@@ -151,6 +156,7 @@ export interface ExtensionConfig {
     excludePatterns: string[];
     maxFileSize: number;
     aiModel: 'gemma-e2b' | 'gemma-e4b' | 'none';
+    aiProcessing: 'fast' | 'moderate' | 'indepth';
 }
 
 export function getConfig(): ExtensionConfig {
@@ -160,6 +166,7 @@ export function getConfig(): ExtensionConfig {
         excludePatterns: config.get<string[]>('excludePatterns', ['**/node_modules/**', '**/dist/**', '**/out/**']),
         maxFileSize: config.get<number>('maxFileSize', 500000),
         aiModel: config.get<'gemma-e2b' | 'gemma-e4b' | 'none'>('aiModel', 'none'),
+        aiProcessing: config.get<'fast' | 'moderate' | 'indepth'>('aiProcessing', 'moderate'),
     };
 }
 
