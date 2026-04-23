@@ -36,7 +36,7 @@ export function Toolbar({
                     className={`toolbar-btn ${viewMode === 'system' ? 'active' : ''}`}
                     onClick={() => onViewModeChange('system')}
                     title="AI System Architecture View"
-                    disabled={!hasSystemArch && !isGeneratingArch}
+                // disabled={!hasSystemArch && !isGeneratingArch}
                 >
                     <Icon name="systemView" fixedWidth /> System
                 </button>

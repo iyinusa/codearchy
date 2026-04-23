@@ -47,7 +47,7 @@ export class ArchitecturePanel {
 
     const panel = vscode.window.createWebviewPanel(
       'codearchArchitecture',
-      'CodeArchy: Architecture',
+      'CodeArchy: Explainable Architecture',
       column,
       {
         enableScripts: true,
@@ -160,6 +160,16 @@ export class ArchitecturePanel {
       case WebviewMessageType.ClearChat:
         this.ollamaService.clearConversation();
         break;
+
+      case WebviewMessageType.SyncChatHistory: {
+        const payload = message.payload as {
+          history: Array<{ role: 'user' | 'assistant' | 'system'; content: string; timestamp: number }>;
+        };
+        if (payload && Array.isArray(payload.history)) {
+          this.ollamaService.setConversationHistory(payload.history);
+        }
+        break;
+      }
 
       case WebviewMessageType.StartVoiceRecording:
         this.handleStartVoiceRecording();

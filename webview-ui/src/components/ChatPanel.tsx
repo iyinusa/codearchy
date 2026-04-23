@@ -2,6 +2,14 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { postMessage } from '../vscode';
 import type { ChatMessage } from '../types';
 import { Icon } from './Icons';
+import {
+    appendConversationMessage,
+    updateConversationMessage,
+    deleteConversationMessage,
+    clearConversation,
+    loadConversation,
+    useProjectId,
+} from '../db';
 
 interface ChatPanelProps {
     isOpen: boolean;
@@ -24,6 +32,58 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const autoSpeakOnNextReplyRef = useRef(false);
     const isAtBottomRef = useRef(true);
+    const projectId = useProjectId();
+    const projectIdRef = useRef<string | null>(projectId);
+    projectIdRef.current = projectId;
+    const messagesRef = useRef<ChatMessage[]>([]);
+    messagesRef.current = messages;
+
+    // Hydrate conversation from DexieJS whenever the active project changes
+    // (e.g. the user opens a different workspace in the same session). All
+    // persisted messages become visible immediately; the extension host's
+    // in-memory Ollama history is rebuilt in parallel so context is aligned.
+    useEffect(() => {
+        if (!projectId) {
+            setMessages([]);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const records = await loadConversation(projectId);
+                if (cancelled) return;
+                const hydrated: ChatMessage[] = records.map(r => ({
+                    id: r.id,
+                    role: r.role,
+                    content: r.content,
+                    timestamp: r.timestamp,
+                }));
+                setMessages(hydrated);
+                // Push history to host so the model context window matches
+                // what the user sees after a refresh / workspace change.
+                postMessage('syncChatHistory', {
+                    history: hydrated.map(m => ({
+                        role: m.role,
+                        content: m.content,
+                        timestamp: m.timestamp,
+                    })),
+                });
+            } catch (e) {
+                console.error('[CodeArchy] loadConversation failed', e);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [projectId]);
+
+    /** Push the current message list (without streaming flags) to the host so
+     *  the LLM conversation history stays in sync after deletes/edits. */
+    const syncHistoryToHost = useCallback((list: ChatMessage[]) => {
+        postMessage('syncChatHistory', {
+            history: list
+                .filter(m => !m.isStreaming)
+                .map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
+        });
+    }, []);
 
     // Auto-scroll only when the user is at/near the bottom.
     // Use instant scrollTop (not smooth) so rapid streaming chunks don't
@@ -95,23 +155,52 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         setIsStreaming(false);
                         return;
                     }
+                    // Finalize the streaming assistant message (or append a
+                    // new one if nothing streamed) and persist it to the DB.
+                    const pid = projectIdRef.current;
                     setMessages((prev) => {
                         const last = prev[prev.length - 1];
+                        const finalizedContent = response.content;
+                        let next: ChatMessage[];
+                        let finalized: ChatMessage;
                         if (last && last.role === 'assistant' && last.isStreaming) {
-                            return [
-                                ...prev.slice(0, -1),
-                                { ...last, content: response.content, isStreaming: false },
-                            ];
-                        }
-                        return [
-                            ...prev,
-                            {
+                            finalized = { ...last, content: finalizedContent, isStreaming: false };
+                            next = [...prev.slice(0, -1), finalized];
+                        } else {
+                            finalized = {
                                 role: 'assistant',
-                                content: response.content,
+                                content: finalizedContent,
                                 timestamp: Date.now(),
                                 isStreaming: false,
-                            },
-                        ];
+                            };
+                            next = [...prev, finalized];
+                        }
+                        if (pid) {
+                            (async () => {
+                                try {
+                                    if (finalized.id !== undefined) {
+                                        await updateConversationMessage(finalized.id, {
+                                            content: finalized.content,
+                                        });
+                                    } else {
+                                        const id = await appendConversationMessage(pid, {
+                                            role: finalized.role,
+                                            content: finalized.content,
+                                            timestamp: finalized.timestamp,
+                                        });
+                                        // Patch the id back into state once persisted.
+                                        setMessages(cur => cur.map(m =>
+                                            m === finalized || (m.timestamp === finalized.timestamp && m.role === finalized.role && m.id === undefined)
+                                                ? { ...m, id }
+                                                : m,
+                                        ));
+                                    }
+                                } catch (e) {
+                                    console.error('[CodeArchy] persist assistant failed', e);
+                                }
+                            })();
+                        }
+                        return next;
                     });
                     setIsStreaming(false);
                     if (autoSpeakOnNextReplyRef.current) {
@@ -172,6 +261,27 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         setError(null);
                         isAtBottomRef.current = true;
 
+                        // Persist voice-originated user message too.
+                        const pid = projectIdRef.current;
+                        if (pid) {
+                            (async () => {
+                                try {
+                                    const id = await appendConversationMessage(pid, {
+                                        role: 'user',
+                                        content: userMsg.content,
+                                        timestamp: userMsg.timestamp,
+                                    });
+                                    setMessages(cur => cur.map(m =>
+                                        m.timestamp === userMsg.timestamp && m.role === 'user' && m.id === undefined
+                                            ? { ...m, id }
+                                            : m,
+                                    ));
+                                } catch (e) {
+                                    console.error('[CodeArchy] persist voice user failed', e);
+                                }
+                            })();
+                        }
+
                         postMessage('chatMessage', { content: transcript });
                     } else {
                         setError('No speech detected. Please try again.');
@@ -201,6 +311,29 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             setError(null);
             isAtBottomRef.current = true;
 
+            // Persist the user message immediately so it survives webview
+            // reloads even if the assistant reply never arrives (network
+            // failure, Ollama crash, etc.).
+            const pid = projectIdRef.current;
+            if (pid) {
+                (async () => {
+                    try {
+                        const id = await appendConversationMessage(pid, {
+                            role: 'user',
+                            content: userMsg.content,
+                            timestamp: userMsg.timestamp,
+                        });
+                        setMessages(cur => cur.map(m =>
+                            m.timestamp === userMsg.timestamp && m.role === 'user' && m.id === undefined
+                                ? { ...m, id }
+                                : m,
+                        ));
+                    } catch (e) {
+                        console.error('[CodeArchy] persist user failed', e);
+                    }
+                })();
+            }
+
             postMessage('chatMessage', { content: text.trim() });
         },
         [isStreaming]
@@ -217,7 +350,32 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         setMessages([]);
         setError(null);
         postMessage('clearChat');
+        const pid = projectIdRef.current;
+        if (pid) {
+            clearConversation(pid).catch(e =>
+                console.error('[CodeArchy] clearConversation failed', e),
+            );
+        }
     };
+
+    /** Remove a single message from the UI, DexieJS store, and the host-side
+     *  Ollama conversation context so subsequent turns never reference it. */
+    const deleteMessage = useCallback(
+        (msg: ChatMessage) => {
+            if (msg.isStreaming) return;
+            setMessages(prev => {
+                const next = prev.filter(m => m !== msg);
+                syncHistoryToHost(next);
+                return next;
+            });
+            if (msg.id !== undefined) {
+                deleteConversationMessage(msg.id).catch(e =>
+                    console.error('[CodeArchy] deleteConversationMessage failed', e),
+                );
+            }
+        },
+        [syncHistoryToHost],
+    );
 
     // --- Audio: Voice Input via Extension Host ---
     // Webview iframes do not grant microphone permission, so capture runs in
@@ -313,7 +471,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 )}
 
                 {messages.map((msg, i) => (
-                    <div key={i} className={`chat-message chat-message-${msg.role}`}>
+                    <div key={msg.id ?? `local-${i}-${msg.timestamp}`} className={`chat-message chat-message-${msg.role}`}>
                         <div className="chat-message-avatar">
                             {msg.role === 'user' ? (
                                 <Icon name="userAvatar" />
@@ -328,15 +486,26 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                 {formatMessage(msg.content)}
                                 {msg.isStreaming && <span className="chat-cursor">▊</span>}
                             </div>
-                            {msg.role === 'assistant' && !msg.isStreaming && (
-                                <button
-                                    className="chat-speak-btn"
-                                    onClick={() => speakText(msg.content)}
-                                    title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
-                                >
-                                    <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />
-                                </button>
-                            )}
+                            <div className="chat-message-actions">
+                                {msg.role === 'assistant' && !msg.isStreaming && (
+                                    <button
+                                        className="chat-speak-btn"
+                                        onClick={() => speakText(msg.content)}
+                                        title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
+                                    >
+                                        <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />
+                                    </button>
+                                )}
+                                {!msg.isStreaming && (
+                                    <button
+                                        className="chat-delete-btn"
+                                        onClick={() => deleteMessage(msg)}
+                                        title="Delete this message"
+                                    >
+                                        <Icon name="close" />
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 ))}

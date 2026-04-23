@@ -29,6 +29,12 @@ import '@xyflow/react/dist/style.css';
 import type { ArchitectureGraph, GraphNode } from '../types';
 import { layoutWithElk, estimateNodeSize } from './elkLayout';
 import { buildFlowSvg, svgToPngBase64 } from './exportSvg';
+import {
+    loadFlowPositions,
+    saveFlowPositions,
+    useProjectId,
+    type PositionMap,
+} from '../db';
 
 /** Imperative handle exposed to parents so they can export exactly what is on
  *  screen (ELK-laid-out nodes + routed edges) rather than re-running a naive
@@ -126,41 +132,93 @@ function ReactFlowViewInner({
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [isLayouting, setIsLayouting] = useState(false);
     const { fitView } = useReactFlow();
+    const projectId = useProjectId();
 
     // Auto-layout trigger: runs whenever the graph structure changes.
+    // Prefers DexieJS-cached positions (so user drags persist across reloads)
+    // and only falls back to ELK when the cache is missing or partial.
     useEffect(() => {
         let cancelled = false;
         setIsLayouting(true);
-        layoutWithElk(rawNodes, rawEdges, {
-            algorithm: 'layered',
-            direction: 'DOWN',
-            edgeRouting: 'ORTHOGONAL',
-            nodeSpacing: 70,
-            layerSpacing: 110,
-            padding: 36,
-        })
-            .then(({ nodes: laidOut, edges: laidEdges }) => {
+
+        const applyLayout = async () => {
+            let cached: PositionMap | null = null;
+            if (projectId) {
+                try {
+                    cached = await loadFlowPositions(projectId);
+                } catch (e) {
+                    console.error('[CodeArchy] loadFlowPositions failed', e);
+                }
+            }
+
+            const hasFullCache =
+                !!cached && rawNodes.every(n => cached && cached[n.id]);
+
+            if (hasFullCache && cached) {
                 if (cancelled) return;
-                setNodes(laidOut);
+                const positioned: Node[] = rawNodes.map(n => ({
+                    ...n,
+                    position: cached![n.id],
+                }));
+                setNodes(positioned);
+                setEdges(rawEdges);
+                requestAnimationFrame(() => {
+                    if (!cancelled) fitView({ padding: 0.2, duration: 300 });
+                });
+                setIsLayouting(false);
+                return;
+            }
+
+            try {
+                const { nodes: laidOut, edges: laidEdges } = await layoutWithElk(
+                    rawNodes,
+                    rawEdges,
+                    {
+                        algorithm: 'layered',
+                        direction: 'DOWN',
+                        edgeRouting: 'ORTHOGONAL',
+                        nodeSpacing: 70,
+                        layerSpacing: 110,
+                        padding: 36,
+                    },
+                );
+                if (cancelled) return;
+                // Overlay cached positions on top of ELK for any nodes the
+                // user has previously moved — so existing placements are
+                // preserved even when the structure changed slightly.
+                const positioned = cached
+                    ? laidOut.map(n => (cached![n.id] ? { ...n, position: cached![n.id] } : n))
+                    : laidOut;
+                setNodes(positioned);
                 setEdges(laidEdges);
                 requestAnimationFrame(() => {
                     if (!cancelled) fitView({ padding: 0.2, duration: 300 });
                 });
-            })
-            .catch(err => {
+                // Persist the fresh layout so subsequent loads skip ELK.
+                if (projectId) {
+                    const map: PositionMap = {};
+                    for (const n of positioned) {
+                        map[n.id] = { x: n.position.x, y: n.position.y };
+                    }
+                    saveFlowPositions(projectId, map);
+                }
+            } catch (err) {
                 console.error('[CodeArchy] ELK layout failed:', err);
                 if (!cancelled) {
                     setNodes(rawNodes);
                     setEdges(rawEdges);
                 }
-            })
-            .finally(() => {
+            } finally {
                 if (!cancelled) setIsLayouting(false);
-            });
+            }
+        };
+
+        applyLayout();
+
         return () => {
             cancelled = true;
         };
-    }, [rawNodes, rawEdges, setNodes, setEdges, fitView]);
+    }, [rawNodes, rawEdges, setNodes, setEdges, fitView, projectId]);
 
     // Apply cosmetic overlays (dim / highlight / selection) without re-layout.
     useEffect(() => {
@@ -236,6 +294,32 @@ function ReactFlowViewInner({
             }
         },
         [onNodeSelect]
+    );
+
+    // Intercept node changes to persist positions whenever the user drags.
+    // Writes are debounced inside saveFlowPositions so we never stall the
+    // drag animation on IndexedDB I/O.
+    const handleNodesChange = useCallback(
+        (changes: Parameters<typeof onNodesChange>[0]) => {
+            onNodesChange(changes);
+            if (!projectId) return;
+            const hasPositionChange = changes.some(
+                c => c.type === 'position' && (c as { position?: unknown }).position,
+            );
+            if (!hasPositionChange) return;
+            // Read the latest positions from the ref populated below so we
+            // capture the state AFTER React Flow applied the change.
+            queueMicrotask(() => {
+                const latest = nodesRef.current;
+                if (!latest || !latest.length) return;
+                const map: PositionMap = {};
+                for (const n of latest) {
+                    map[n.id] = { x: n.position.x, y: n.position.y };
+                }
+                saveFlowPositions(projectId, map);
+            });
+        },
+        [onNodesChange, projectId],
     );
 
     const onNodeDoubleClick = useCallback(
@@ -319,7 +403,7 @@ function ReactFlowViewInner({
                 nodes={nodes}
                 edges={edges}
                 nodeTypes={nodeTypes}
-                onNodesChange={onNodesChange}
+                onNodesChange={handleNodesChange}
                 onEdgesChange={onEdgesChange}
                 onNodeClick={onNodeClick}
                 onNodeDoubleClick={onNodeDoubleClick}

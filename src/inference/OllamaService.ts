@@ -246,6 +246,17 @@ export class OllamaService {
         this.conversationHistory = [];
     }
 
+    /** Replace conversation history from an external source (e.g. the webview
+     *  DexieJS store) so per-message deletes stay in sync with the model's
+     *  in-memory context window. */
+    setConversationHistory(history: ChatMessage[]): void {
+        this.conversationHistory = history.map(m => ({
+            role: m.role,
+            content: m.content,
+            timestamp: m.timestamp,
+        }));
+    }
+
     getConversationHistory(): ChatMessage[] {
         return [...this.conversationHistory];
     }

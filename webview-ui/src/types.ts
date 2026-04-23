@@ -42,6 +42,10 @@ export interface GraphMetadata {
     totalSymbols: number;
     totalEdges: number;
     languages: string[];
+    /** Stable identity for persistence (workspace absolute path). */
+    projectId?: string;
+    projectName?: string;
+    projectPath?: string;
 }
 
 export interface ArchitectureGraph {
@@ -107,4 +111,6 @@ export interface ChatMessage {
     content: string;
     timestamp: number;
     isStreaming?: boolean;
+    /** Dexie auto-increment id once the message is persisted. */
+    id?: number;
 }

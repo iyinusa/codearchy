@@ -31,6 +31,12 @@ import { Icon } from './Icons';
 import type { AppIconName } from './Icons';
 import { layoutWithElk, estimateNodeSize } from './elkLayout';
 import { buildFlowSvg, svgToPngBase64 } from './exportSvg';
+import {
+    loadSystemRecord,
+    saveSystemPositions,
+    useProjectId,
+    type PositionMap,
+} from '../db';
 
 /** Imperative handle exposed to parents for view-aware export (keeps ELK
  *  layout + routed edges so PNG/SVG match what's on screen). */
@@ -335,41 +341,90 @@ function SystemViewInner({
     const [isLayouting, setIsLayouting] = useState(false);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const { fitView } = useReactFlow();
+    const projectId = useProjectId();
 
     useEffect(() => {
         let cancelled = false;
         setIsLayouting(true);
         const direction = pickDirection(rawNodes.length, rawEdges.length);
-        layoutWithElk(rawNodes, rawEdges, {
-            algorithm: 'layered',
-            direction,
-            edgeRouting: 'ORTHOGONAL',
-            nodeSpacing: 80,
-            layerSpacing: 140,
-            padding: 40,
-        })
-            .then(({ nodes: laidOut, edges: laidEdges }) => {
+
+        const applyLayout = async () => {
+            let cachedPositions: PositionMap | null = null;
+            if (projectId) {
+                try {
+                    const rec = await loadSystemRecord(projectId);
+                    cachedPositions = rec?.positions ?? null;
+                } catch (e) {
+                    console.error('[CodeArchy] loadSystemRecord failed', e);
+                }
+            }
+
+            const hasFullCache =
+                !!cachedPositions && rawNodes.every(n => cachedPositions && cachedPositions[n.id]);
+
+            if (hasFullCache && cachedPositions) {
                 if (cancelled) return;
-                setNodes(laidOut);
+                const positioned: Node[] = rawNodes.map(n => ({
+                    ...n,
+                    position: cachedPositions![n.id],
+                }));
+                setNodes(positioned);
+                setEdges(rawEdges);
+                requestAnimationFrame(() => {
+                    if (!cancelled) fitView({ padding: 0.3, duration: 300 });
+                });
+                setIsLayouting(false);
+                return;
+            }
+
+            try {
+                const { nodes: laidOut, edges: laidEdges } = await layoutWithElk(
+                    rawNodes,
+                    rawEdges,
+                    {
+                        algorithm: 'layered',
+                        direction,
+                        edgeRouting: 'ORTHOGONAL',
+                        nodeSpacing: 80,
+                        layerSpacing: 140,
+                        padding: 40,
+                    },
+                );
+                if (cancelled) return;
+                const positioned = cachedPositions
+                    ? laidOut.map(n =>
+                        cachedPositions![n.id] ? { ...n, position: cachedPositions![n.id] } : n,
+                    )
+                    : laidOut;
+                setNodes(positioned);
                 setEdges(laidEdges);
                 requestAnimationFrame(() => {
                     if (!cancelled) fitView({ padding: 0.3, duration: 300 });
                 });
-            })
-            .catch(err => {
+                if (projectId) {
+                    const map: PositionMap = {};
+                    for (const n of positioned) {
+                        map[n.id] = { x: n.position.x, y: n.position.y };
+                    }
+                    saveSystemPositions(projectId, map);
+                }
+            } catch (err) {
                 console.error('[CodeArchy] ELK layout failed (system view):', err);
                 if (!cancelled) {
                     setNodes(rawNodes);
                     setEdges(rawEdges);
                 }
-            })
-            .finally(() => {
+            } finally {
                 if (!cancelled) setIsLayouting(false);
-            });
+            }
+        };
+
+        applyLayout();
+
         return () => {
             cancelled = true;
         };
-    }, [rawNodes, rawEdges, setNodes, setEdges, fitView]);
+    }, [rawNodes, rawEdges, setNodes, setEdges, fitView, projectId]);
 
     const connectedIds = useMemo(() => {
         if (!selectedId) return null;
@@ -441,6 +496,28 @@ function SystemViewInner({
     nodesRef.current = nodes;
     edgesRef.current = edges;
     archRef.current = architecture;
+
+    // Debounced persistence of user-driven drag positions.
+    const handleNodesChange = useCallback(
+        (changes: Parameters<typeof onNodesChange>[0]) => {
+            onNodesChange(changes);
+            if (!projectId) return;
+            const hasPositionChange = changes.some(
+                c => c.type === 'position' && (c as { position?: unknown }).position,
+            );
+            if (!hasPositionChange) return;
+            queueMicrotask(() => {
+                const latest = nodesRef.current;
+                if (!latest || !latest.length) return;
+                const map: PositionMap = {};
+                for (const n of latest) {
+                    map[n.id] = { x: n.position.x, y: n.position.y };
+                }
+                saveSystemPositions(projectId, map);
+            });
+        },
+        [onNodesChange, projectId],
+    );
 
     useImperativeHandle(
         forwardedRef,
