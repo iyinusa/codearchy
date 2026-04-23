@@ -128,8 +128,6 @@ export enum WebviewMessageType {
     SystemArchStream = 'systemArchStream',
     /** Webview → host: switch the AI processing tier (fast/moderate/indepth). */
     SetProcessingMode = 'setProcessingMode',
-    /** Webview → host: pre-load the selected model into Ollama memory. */
-    WarmUpModel = 'warmUpModel',
     // Chat / Conversation
     ChatMessage = 'chatMessage',
     ChatResponse = 'chatResponse',

@@ -106,9 +106,6 @@ export class ArchitecturePanel {
           type: WebviewMessageType.SetProcessingMode,
           payload: { mode: this.processingMode },
         });
-        // Pre-load the model into Ollama memory so the first user-triggered
-        // call doesn't pay the cold-start tax. Best-effort; failures are silent.
-        this.warmUpSelectedModel();
         break;
 
       case WebviewMessageType.NavigateToFile: {
@@ -165,10 +162,6 @@ export class ArchitecturePanel {
         }
         break;
       }
-
-      case WebviewMessageType.WarmUpModel:
-        this.warmUpSelectedModel();
-        break;
 
       case WebviewMessageType.GenerateSystemArch:
         this.handleGenerateSystemArch();
@@ -338,15 +331,6 @@ export class ArchitecturePanel {
     // Send updated status
     this.handleModelStatusRequest();
     vscode.window.showInformationMessage(`CodeArchy: AI model set to ${modelId}`);
-    // Warm up the newly selected model immediately.
-    this.warmUpSelectedModel();
-  }
-
-  /** Fire-and-forget pre-load so the model is resident before the first call. */
-  private warmUpSelectedModel(): void {
-    const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
-    if (!modelOpt) return;
-    void this.ollamaService.warmUp(modelOpt.ollamaTag, this.processingMode);
   }
 
   private async handleGenerateSystemArch() {

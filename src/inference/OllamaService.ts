@@ -237,30 +237,6 @@ export class OllamaService {
         return response;
     }
 
-    /**
-     * Pre-load the model into memory so the first real call doesn't pay the
-     * 2–10 s cold-start cost. Sends a single-token request and asks Ollama to
-     * keep the model resident for `keep_alive`. Safe to call repeatedly.
-     */
-    async warmUp(modelTag: string, mode: ProcessingMode = 'moderate'): Promise<void> {
-        const profile = getProcessingProfile(mode);
-        const body = JSON.stringify({
-            model: modelTag,
-            prompt: 'ok',
-            stream: false,
-            keep_alive: profile.keepAlive,
-            options: {
-                num_predict: 1,
-                temperature: 0,
-            },
-        });
-        try {
-            await this.httpPost('/api/generate', body, 60000);
-        } catch {
-            // Warm-up is best-effort — never surface errors to the UI.
-        }
-    }
-
     /** Transcribe user-recorded audio using local Ollama + Gemma. */
     async transcribeAudio(audioBase64: string, mimeType: string, modelTag: string): Promise<string> {
         const format = this.getAudioFormatFromMime(mimeType);

@@ -833,7 +833,7 @@ body {
 }
 
 .system-node.shape-gateway .system-node-inner {
-    padding: 18px 32px 18px 40px;
+    padding: 18px 34px 18px 46px;
     /* text-align: center; */
 }
 
@@ -853,7 +853,7 @@ body {
 }
 
 .system-node.shape-ui .system-node-inner {
-    padding: 16px 18px 24px 22px;
+    padding: 16px 20px 24px 26px;
 }
 
 .system-node.shape-worker .system-node-inner {
