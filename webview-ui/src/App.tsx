@@ -13,6 +13,12 @@ import { Toolbar } from './components/Toolbar';
 import { ModelSelector } from './components/ModelSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
+import {
+    setProjectId,
+    upsertProject,
+    loadSystemRecord,
+    saveSystemArchitecture,
+} from './db';
 
 export function App() {
     const [graph, setGraph] = useState<ArchitectureGraph | null>(null);
@@ -35,9 +41,53 @@ export function App() {
         const handler = (event: MessageEvent) => {
             const message = event.data;
             switch (message.type) {
-                case 'graphData':
-                    setGraph(message.payload as ArchitectureGraph);
+                case 'graphData': {
+                    const nextGraph = message.payload as ArchitectureGraph;
+                    setGraph(nextGraph);
+
+                    // Sync project identity + codebase tree to IndexedDB and
+                    // hydrate any cached system architecture for this project
+                    // so the diagram shows up instantly even before the user
+                    // re-runs AI Analyze.
+                    const projectId = nextGraph.metadata?.projectId;
+                    if (projectId) {
+                        setProjectId(projectId);
+                        const projectName = nextGraph.metadata?.projectName || projectId;
+                        const projectPath = nextGraph.metadata?.projectPath || projectId;
+
+                        // Fire-and-forget — never block render on IDB writes.
+                        (async () => {
+                            try {
+                                const { structureChanged } = await upsertProject({
+                                    id: projectId,
+                                    name: projectName,
+                                    path: projectPath,
+                                    graph: nextGraph,
+                                });
+                                if (structureChanged) {
+                                    // Codebase topology changed → the cached
+                                    // AI architecture (if any) is now stale.
+                                    // upsertProject already cleared IDB; drop
+                                    // it from session state too so the user
+                                    // sees a fresh "Generate" prompt instead
+                                    // of outdated subsystems.
+                                    setSystemArch(null);
+                                    return;
+                                }
+                                const cached = await loadSystemRecord(projectId);
+                                if (cached) {
+                                    // Only hydrate if the current session has
+                                    // no system arch yet — don't clobber a
+                                    // freshly generated architecture.
+                                    setSystemArch(prev => prev ?? cached.architecture);
+                                }
+                            } catch (e) {
+                                console.error('[CodeArchy] failed to hydrate project', e);
+                            }
+                        })();
+                    }
                     break;
+                }
                 case 'exportSVG':
                     exportAsSVG();
                     break;
@@ -50,6 +100,14 @@ export function App() {
                     setIsGeneratingArch(false);
                     setArchProgress('');
                     setViewMode('system');
+                    // Persist the freshly generated architecture so it survives
+                    // webview reloads and workspace reopenings.
+                    const projectId = (graph ?? null)?.metadata?.projectId;
+                    if (projectId) {
+                        saveSystemArchitecture(projectId, arch).catch(e =>
+                            console.error('[CodeArchy] failed to save system arch', e),
+                        );
+                    }
                     break;
                 }
                 case 'systemArchProgress': {
@@ -70,6 +128,7 @@ export function App() {
         window.addEventListener('message', handler);
         postMessage('ready');
         return () => window.removeEventListener('message', handler);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const exportAsSVG = useCallback(() => {

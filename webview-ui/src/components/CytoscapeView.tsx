@@ -2,6 +2,12 @@ import React, { useEffect, useRef, useCallback, forwardRef, useImperativeHandle 
 import cytoscape from 'cytoscape';
 import type { ArchitectureGraph } from '../types';
 import { Icon } from './Icons';
+import {
+    loadCytoscapePositions,
+    saveCytoscapePositions,
+    useProjectId,
+    type PositionMap,
+} from '../db';
 
 // Dynamically import dagre layout if available
 let dagreRegistered = false;
@@ -39,6 +45,9 @@ export const CytoscapeView = forwardRef<CytoscapeViewHandle, CytoscapeViewProps>
 }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<cytoscape.Core | null>(null);
+    const projectId = useProjectId();
+    const projectIdRef = useRef<string | null>(projectId);
+    projectIdRef.current = projectId;
 
     // Initialize Cytoscape
     useEffect(() => {
@@ -97,6 +106,48 @@ export const CytoscapeView = forwardRef<CytoscapeViewHandle, CytoscapeViewProps>
             maxZoom: 3,
         });
 
+        // Hydrate cached positions (if any) after the initial layout settles.
+        // Cytoscape runs its layout async, so we wait for `layoutstop` before
+        // applying persisted coordinates — otherwise the engine would
+        // overwrite them. Positions are saved whenever the user drags a node
+        // (`dragfree`), debounced to keep IDB writes off the render path.
+        const applyCachedPositions = async () => {
+            const pid = projectIdRef.current;
+            if (!pid) return;
+            try {
+                const cached = await loadCytoscapePositions(pid);
+                if (!cached) return;
+                let applied = false;
+                cy.nodes('[type="module"]').forEach(node => {
+                    const pos = cached[node.id()];
+                    if (pos) {
+                        node.position(pos);
+                        applied = true;
+                    }
+                });
+                if (applied) {
+                    cy.fit(undefined, 40);
+                }
+            } catch (e) {
+                console.error('[CodeArchy] loadCytoscapePositions failed', e);
+            }
+        };
+
+        cy.one('layoutstop', () => {
+            applyCachedPositions();
+        });
+
+        const persistPositions = () => {
+            const pid = projectIdRef.current;
+            if (!pid) return;
+            const map: PositionMap = {};
+            cy.nodes('[type="module"]').forEach(node => {
+                const p = node.position();
+                map[node.id()] = { x: p.x, y: p.y };
+            });
+            saveCytoscapePositions(pid, map);
+        };
+
         // Event handlers
         cy.on('tap', 'node[type="module"]', (event) => {
             const nodeId = event.target.id();
@@ -107,6 +158,10 @@ export const CytoscapeView = forwardRef<CytoscapeViewHandle, CytoscapeViewProps>
             if (event.target === cy) {
                 onNodeSelect(null);
             }
+        });
+
+        cy.on('dragfree', 'node[type="module"]', () => {
+            persistPositions();
         });
 
         cyRef.current = cy;

@@ -89,6 +89,12 @@ export interface GraphMetadata {
     totalSymbols: number;
     totalEdges: number;
     languages: string[];
+    /** Stable identity for persistence (workspace absolute path). */
+    projectId?: string;
+    /** Display name for the project (usually folder basename). */
+    projectName?: string;
+    /** Absolute filesystem path of the workspace root. */
+    projectPath?: string;
 }
 
 export interface WebviewMessage {
@@ -123,6 +129,9 @@ export enum WebviewMessageType {
     ChatChunk = 'chatChunk',
     ChatThinking = 'chatThinking',
     ClearChat = 'clearChat',
+    /** Webview → host: replace the host-side conversation history so the LLM
+     *  context window matches the persisted DexieJS store after a delete. */
+    SyncChatHistory = 'syncChatHistory',
     // Voice input (extension-host capture)
     StartVoiceRecording = 'startVoiceRecording',
     StopVoiceRecording = 'stopVoiceRecording',

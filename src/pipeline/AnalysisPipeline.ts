@@ -90,6 +90,16 @@ export class AnalysisPipeline {
         onProgress({ phase: 'inference', current: 0, total: 1, message: 'Inferring architecture...' });
         graph = this.inference.inferSubsystems(graph);
 
+        // Attach project identity for persistence in the webview DB. Keeping
+        // this on the metadata lets the webview key every persisted record
+        // (positions, conversations, system arch) against the workspace root.
+        graph.metadata = {
+            ...graph.metadata,
+            projectId: workspaceRoot,
+            projectName: path.basename(workspaceRoot),
+            projectPath: workspaceRoot,
+        };
+
         onProgress({ phase: 'complete', current: 1, total: 1, message: 'Analysis complete.' });
         return graph;
     }

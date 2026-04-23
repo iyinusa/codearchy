@@ -161,6 +161,16 @@ export class ArchitecturePanel {
         this.ollamaService.clearConversation();
         break;
 
+      case WebviewMessageType.SyncChatHistory: {
+        const payload = message.payload as {
+          history: Array<{ role: 'user' | 'assistant' | 'system'; content: string; timestamp: number }>;
+        };
+        if (payload && Array.isArray(payload.history)) {
+          this.ollamaService.setConversationHistory(payload.history);
+        }
+        break;
+      }
+
       case WebviewMessageType.StartVoiceRecording:
         this.handleStartVoiceRecording();
         break;
