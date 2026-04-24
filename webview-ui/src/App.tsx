@@ -21,7 +21,7 @@ import {
     loadSystemRecord,
     saveSystemArchitecture,
     createNarrator,
-    listNarrators,
+    subscribeNarrators,
     type NarratorRecord,
 } from './db';
 
@@ -89,34 +89,26 @@ export function App() {
         }
     }, [storyPlayer.state.status]);
 
-    // Reload narrator list when the project changes.
+    // Live-subscribe to the narrators table so new entries — whether added
+    // by the AI auto-generator, rename/delete, or any other tab — surface
+    // in the sidebar instantly with no manual refetch required.
     const projectIdState = graph?.metadata?.projectId;
     useEffect(() => {
         if (!projectIdState) {
             setNarrators([]);
             return;
         }
-        let cancelled = false;
-        (async () => {
-            try {
-                const list = await listNarrators(projectIdState);
-                if (!cancelled) setNarrators(list);
-            } catch (e) {
-                console.error('[CodeArchy] listNarrators failed', e);
-            }
-        })();
-        return () => { cancelled = true; };
+        const unsubscribe = subscribeNarrators(
+            projectIdState,
+            (list) => setNarrators(list),
+        );
+        return unsubscribe;
     }, [projectIdState]);
 
-    const refreshNarrators = useCallback(async () => {
-        const pid = getProjectId();
-        if (!pid) return;
-        try {
-            const list = await listNarrators(pid);
-            setNarrators(list);
-        } catch (e) {
-            console.error('[CodeArchy] listNarrators failed', e);
-        }
+    // Kept as a no-op stable reference so existing Sidebar prop wiring
+    // remains unchanged. The live subscription above now handles refresh.
+    const refreshNarrators = useCallback(() => {
+        /* no-op — liveQuery keeps state in sync automatically */
     }, []);
 
     useEffect(() => {
@@ -231,6 +223,8 @@ export function App() {
                     }
                     const pid = getProjectId();
                     if (!pid) break;
+                    // Persist only — the live Dexie subscription above will
+                    // push the new record into `narrators` state instantly.
                     (async () => {
                         try {
                             await createNarrator(pid, {
@@ -240,8 +234,6 @@ export function App() {
                                 preferredView: payload.preferredView,
                                 messageTimestamp: payload.messageTimestamp,
                             });
-                            const list = await listNarrators(pid);
-                            setNarrators(list);
                         } catch (e) {
                             console.error('[CodeArchy] save narrator failed', e);
                         }

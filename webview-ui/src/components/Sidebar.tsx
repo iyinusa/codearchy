@@ -170,7 +170,7 @@ export function Sidebar({
             <div className="narrator-section">
                 <div className="narrator-section-header">
                     <Icon name="narrator" />
-                    <span>NARRATIONS</span>
+                    <span>NARRATIONS / EXPLAINERS</span>
                     <span className="narrator-section-count">{narrators.length}</span>
                 </div>
                 {narrators.length > 0 && (
