@@ -416,6 +416,10 @@ export class ArchitecturePanel {
 
       this.currentSystemArch = architecture;
 
+      // Keep the OllamaService chat context up to date so subsequent chat
+      // messages automatically include the freshly-generated subsystem data.
+      this.ollamaService.setSystemArchitecture(architecture);
+
       this.panel.webview.postMessage({
         type: WebviewMessageType.SystemArchData,
         payload: architecture,
@@ -453,34 +457,60 @@ export class ArchitecturePanel {
       // we issue the narration request, reducing queue contention on the model.
       await new Promise<void>((r) => setTimeout(r, 500));
 
-      // Prefer the system architecture (fewer, higher-level nodes = better
-      // narration grounding). Fall back to the codebase graph otherwise.
-      const preferSystem = !!this.currentSystemArch && this.currentSystemArch.nodes.length > 0;
-      const nodes = preferSystem
-        ? this.currentSystemArch!.nodes.map((n) => ({
-          id: n.id,
-          label: n.label,
-          description: n.description,
-        }))
-        : (this.currentGraph?.subsystems ?? []).map((s) => ({
-          id: s.id,
-          label: s.name,
-          description: s.description,
-        }));
+      // Build the narrator node list.
+      //
+      // Priority order (most granular → highest value for step-by-step tours):
+      //   1. Individual module nodes from the Flow Diagram (reactflow) — best
+      //      for detailed walkthroughs since modules map 1-to-1 with files.
+      //   2. Subsystem group nodes from the Flow Diagram — good mid-level hops.
+      //   3. System Diagram subsystems — useful for high-level questions.
+      //
+      // The preferredView defaults to 'reactflow' so the narrator walks
+      // through the Flow Diagram by default. App.tsx will switch to the
+      // System view if the narrator picks a system-arch node id.
 
-      if (nodes.length === 0 && this.currentGraph) {
-        for (const n of this.currentGraph.nodes.slice(0, 80)) {
+      const FLOW_NODE_CAP = 55;
+      const SYS_NODE_CAP = 10;
+
+      const nodes: Array<{ id: string; label: string; description?: string }> = [];
+
+      // 1. Module-level nodes (Flow Diagram) — primary source
+      if (this.currentGraph) {
+        for (const n of this.currentGraph.nodes.slice(0, FLOW_NODE_CAP)) {
           nodes.push({
             id: n.id,
             label: n.label,
-            description: (n.metadata?.language as string) || '',
+            description: (n.metadata?.language as string) || undefined,
           });
+        }
+      }
+
+      // 2. Subsystem groupings from the Flow graph (if not already covered)
+      if (this.currentGraph && nodes.length < FLOW_NODE_CAP) {
+        for (const s of this.currentGraph.subsystems) {
+          if (!nodes.some(n => n.id === s.id)) {
+            nodes.push({ id: s.id, label: s.name, description: s.description });
+          }
+        }
+      }
+
+      // 3. System Diagram nodes (supplement, capped — lower priority)
+      if (this.currentSystemArch?.nodes.length) {
+        let added = 0;
+        for (const n of this.currentSystemArch.nodes) {
+          if (added >= SYS_NODE_CAP) break;
+          if (!nodes.some(existing => existing.id === n.id)) {
+            nodes.push({ id: n.id, label: n.label, description: n.description });
+            added++;
+          }
         }
       }
 
       if (nodes.length === 0) return;
 
-      const preferredView: 'system' | 'reactflow' = preferSystem ? 'system' : 'reactflow';
+      // Default view: Flow Diagram. App.tsx switches to System view automatically
+      // if the narrator picks a system-arch node id.
+      const preferredView: 'system' | 'reactflow' = 'reactflow';
       const result = await this.ollamaService.generateNarration(
         { question: payload.question, answer: payload.answer, nodes, preferredView },
         modelOpt.ollamaTag,
@@ -584,8 +614,9 @@ export class ArchitecturePanel {
         return;
       }
 
-      // Set architecture context for chat
+      // Set architecture context for chat (both graph + system arch)
       this.ollamaService.setArchitectureContext(this.currentGraph, this.processingMode);
+      this.ollamaService.setSystemArchitecture(this.currentSystemArch);
 
       const response = await this.ollamaService.chat(
         content,

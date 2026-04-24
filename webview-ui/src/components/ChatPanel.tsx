@@ -629,40 +629,60 @@ function ThinkingBubble({ text }: { text: string }) {
 
 /** Full markdown formatter: headers, lists, tables, code blocks, bold, italic, inline code */
 // ── LaTeX / math symbol sanitizer ─────────────────────────────────────────────
-// Gemma occasionally emits LaTeX math notation like $\rightarrow$ or $$expr$$.
-// Replace common symbols with their Unicode equivalents so they render cleanly.
-const LATEX_SYMBOLS: [RegExp, string][] = [
-    [/\$\\rightarrow\$/g, '→'],
-    [/\$\\leftarrow\$/g, '←'],
-    [/\$\\Rightarrow\$/g, '⇒'],
-    [/\$\\Leftarrow\$/g, '⇐'],
-    [/\$\\leftrightarrow\$/g, '↔'],
-    [/\$\\Leftrightarrow\$/g, '⟺'],
-    [/\$\\uparrow\$/g, '↑'],
-    [/\$\\downarrow\$/g, '↓'],
-    [/\$\\to\$/g, '→'],
-    [/\$\\gets\$/g, '←'],
-    [/\$\\geq\$/g, '≥'],
-    [/\$\\leq\$/g, '≤'],
-    [/\$\\neq\$/g, '≠'],
-    [/\$\\approx\$/g, '≈'],
-    [/\$\\times\$/g, '×'],
-    [/\$\\cdot\$/g, '·'],
-    [/\$\\infty\$/g, '∞'],
-    [/\$\\alpha\$/g, 'α'],
-    [/\$\\beta\$/g, 'β'],
-    [/\$\\gamma\$/g, 'γ'],
-    [/\$\\delta\$/g, 'δ'],
-    // Strip any remaining $...$ inline math fences (keep the inner text).
-    [/\$\$([^$]+)\$\$/g, '$1'],
-    [/\$([^$\n]+)\$/g, '$1'],
-];
-
+// Gemma occasionally emits LaTeX math notation — from simple $\rightarrow$ to
+// full command sequences like \xrightarrow{\text{label}}. Convert all to
+// Unicode / plain text so the chat panel renders cleanly.
 function sanitizeLatex(text: string): string {
     let out = text;
-    for (const [re, replacement] of LATEX_SYMBOLS) {
-        out = out.replace(re, replacement);
-    }
+
+    // Stage 1: named arrows with optional label (most specific — handle first
+    //   so \xrightarrow{\text{Trigger}} → \xrightarrow{Trigger} → →[Trigger])
+    out = out.replace(/\\xrightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `→[${l.trim()}]` : '→');
+    out = out.replace(/\\xleftarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `←[${l.trim()}]` : '←');
+    out = out.replace(/\\xRightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `⇒[${l.trim()}]` : '⇒');
+    out = out.replace(/\\xLeftarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `⇐[${l.trim()}]` : '⇐');
+    out = out.replace(/\\xleftrightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `↔[${l.trim()}]` : '↔');
+
+    // Stage 2: unwrap \text{…} and common math/text wrappers
+    out = out.replace(/\\text\{([^{}]*)\}/g, '$1');
+    out = out.replace(/\\(?:mathbf|mathit|mathcal|mathrm|mathsf|mathtt|boldsymbol|textbf|textit|texttt|textrm|emph)\{([^{}]*)\}/g, '$1');
+
+    // Stage 3: $…$-delimited symbol shorthands
+    out = out.replace(/\$\\rightarrow\$/g, '→');
+    out = out.replace(/\$\\leftarrow\$/g, '←');
+    out = out.replace(/\$\\Rightarrow\$/g, '⇒');
+    out = out.replace(/\$\\Leftarrow\$/g, '⇐');
+    out = out.replace(/\$\\leftrightarrow\$/g, '↔');
+    out = out.replace(/\$\\Leftrightarrow\$/g, '⟺');
+    out = out.replace(/\$\\uparrow\$/g, '↑');
+    out = out.replace(/\$\\downarrow\$/g, '↓');
+    out = out.replace(/\$\\to\$/g, '→');
+    out = out.replace(/\$\\gets\$/g, '←');
+    out = out.replace(/\$\\geq\$/g, '≥');
+    out = out.replace(/\$\\leq\$/g, '≤');
+    out = out.replace(/\$\\neq\$/g, '≠');
+    out = out.replace(/\$\\approx\$/g, '≈');
+    out = out.replace(/\$\\times\$/g, '×');
+    out = out.replace(/\$\\cdot\$/g, '·');
+    out = out.replace(/\$\\infty\$/g, '∞');
+    out = out.replace(/\$\\alpha\$/g, 'α');
+    out = out.replace(/\$\\beta\$/g, 'β');
+    out = out.replace(/\$\\gamma\$/g, 'γ');
+    out = out.replace(/\$\\delta\$/g, 'δ');
+    // Strip remaining $$…$$ or $…$ fences, keeping inner text
+    out = out.replace(/\$\$([^$]+)\$\$/g, '$1');
+    out = out.replace(/\$([^$\n]+)\$/g, '$1');
+
+    // Stage 4: catch-all — any remaining \command{content} → content
+    out = out.replace(/\\[a-zA-Z]+\{([^{}]*)\}/g, '$1');
+    // Lone \command (no braces) — remove
+    out = out.replace(/\\[a-zA-Z]+\b/g, '');
+
     return out;
 }
 
