@@ -48,10 +48,18 @@ export function App() {
     const cytoscapeRef = useRef<CytoscapeViewHandle>(null);
     const reactFlowRef = useRef<ReactFlowViewHandle>(null);
     const systemViewRef = useRef<SystemViewHandle>(null);
+    const archStreamBodyRef = useRef<HTMLPreElement>(null);
     const systemArchRef = useRef<SystemArchitecture | null>(null);
     systemArchRef.current = systemArch;
     const viewModeRef = useRef<ViewMode>(viewMode);
     viewModeRef.current = viewMode;
+
+    // Scroll the arch-stream body to the bottom as new model tokens arrive.
+    useEffect(() => {
+        if (archStreamBodyRef.current) {
+            archStreamBodyRef.current.scrollTop = archStreamBodyRef.current.scrollHeight;
+        }
+    }, [archStream]);
 
     /** Focus a narrated node, switching to the best-fit view automatically so
      *  the target is actually visible. System view is preferred when the id
@@ -397,15 +405,17 @@ export function App() {
                         <SystemView ref={systemViewRef} architecture={systemArch} showMiniMap={showMiniMap} narratedNodeId={narratedNodeId} />
                     ) : isGeneratingArch ? (
                         <div className="loading">
-                            <div className="spinner" />
-                            <div className="loading-text">
-                                <strong>Generating System Architecture</strong>
-                                <span className="loading-sub">{archProgress}</span>
+                            <div className="loading-arch-top">
+                                <div className="spinner" />
+                                <div className="loading-text">
+                                    <strong>Generating System Architecture</strong>
+                                    <span className="loading-sub">{archProgress}</span>
+                                </div>
                             </div>
                             {archStream && (
                                 <div className="arch-stream" aria-live="polite">
                                     <div className="arch-stream-header">Live model output</div>
-                                    <pre className="arch-stream-body">{archStream}</pre>
+                                    <pre ref={archStreamBodyRef} className="arch-stream-body">{archStream}</pre>
                                 </div>
                             )}
                         </div>

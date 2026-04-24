@@ -628,8 +628,48 @@ function ThinkingBubble({ text }: { text: string }) {
 }
 
 /** Full markdown formatter: headers, lists, tables, code blocks, bold, italic, inline code */
+// ── LaTeX / math symbol sanitizer ─────────────────────────────────────────────
+// Gemma occasionally emits LaTeX math notation like $\rightarrow$ or $$expr$$.
+// Replace common symbols with their Unicode equivalents so they render cleanly.
+const LATEX_SYMBOLS: [RegExp, string][] = [
+    [/\$\\rightarrow\$/g, '→'],
+    [/\$\\leftarrow\$/g, '←'],
+    [/\$\\Rightarrow\$/g, '⇒'],
+    [/\$\\Leftarrow\$/g, '⇐'],
+    [/\$\\leftrightarrow\$/g, '↔'],
+    [/\$\\Leftrightarrow\$/g, '⟺'],
+    [/\$\\uparrow\$/g, '↑'],
+    [/\$\\downarrow\$/g, '↓'],
+    [/\$\\to\$/g, '→'],
+    [/\$\\gets\$/g, '←'],
+    [/\$\\geq\$/g, '≥'],
+    [/\$\\leq\$/g, '≤'],
+    [/\$\\neq\$/g, '≠'],
+    [/\$\\approx\$/g, '≈'],
+    [/\$\\times\$/g, '×'],
+    [/\$\\cdot\$/g, '·'],
+    [/\$\\infty\$/g, '∞'],
+    [/\$\\alpha\$/g, 'α'],
+    [/\$\\beta\$/g, 'β'],
+    [/\$\\gamma\$/g, 'γ'],
+    [/\$\\delta\$/g, 'δ'],
+    // Strip any remaining $...$ inline math fences (keep the inner text).
+    [/\$\$([^$]+)\$\$/g, '$1'],
+    [/\$([^$\n]+)\$/g, '$1'],
+];
+
+function sanitizeLatex(text: string): string {
+    let out = text;
+    for (const [re, replacement] of LATEX_SYMBOLS) {
+        out = out.replace(re, replacement);
+    }
+    return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function formatMessage(text: string): React.ReactNode {
-    const lines = text.split('\n');
+    const lines = sanitizeLatex(text).split('\n');
     const nodes: React.ReactNode[] = [];
     let i = 0;
     let k = 0;

@@ -149,6 +149,32 @@ export function getProcessingProfile(mode: ProcessingMode): Readonly<ProcessingP
 
 const OLLAMA_BASE = 'http://localhost:11434';
 
+// Strip LaTeX math notation that Gemma occasionally emits (e.g. $\rightarrow$)
+// so narrator steps read as plain English when spoken by the TTS engine.
+const LATEX_NARRATION_PATTERNS: Array<[RegExp, string]> = [
+    [/\$\\rightarrow\$/g, '→'],
+    [/\$\\leftarrow\$/g, '←'],
+    [/\$\\Rightarrow\$/g, '⇒'],
+    [/\$\\Leftarrow\$/g, '⇐'],
+    [/\$\\leftrightarrow\$/g, '↔'],
+    [/\$\\to\$/g, '→'],
+    [/\$\\gets\$/g, '←'],
+    [/\$\\geq\$/g, '≥'],
+    [/\$\\leq\$/g, '≤'],
+    [/\$\\neq\$/g, '≠'],
+    [/\$\\times\$/g, '×'],
+    [/\$\\cdot\$/g, '·'],
+    [/\$\$([^$]+)\$\$/g, '$1'],
+    [/\$([^$\n]+)\$/g, '$1'],
+];
+function sanitizeNarration(text: string): string {
+    let out = text;
+    for (const [re, replacement] of LATEX_NARRATION_PATTERNS) {
+        out = out.replace(re, replacement);
+    }
+    return out;
+}
+
 export class OllamaService {
     private conversationHistory: ChatMessage[] = [];
     private architectureContext: string = '';
@@ -239,8 +265,8 @@ export class OllamaService {
 
     /** Produce a narrator timeline from an assistant response, grounded in the
      *  available node ids. Runs silently — the Webview renders the result as
-     *  an animated Story Player. Uses the same Ollama model but a focused
-     *  prompt + small token budget so it never blocks the chat UI. */
+     *  an animated Story Player. Respects the user-selected processing mode
+     *  but clamps token budgets so it never blocks the chat UI. */
     async generateNarration(
         input: {
             question: string;
@@ -249,13 +275,22 @@ export class OllamaService {
             preferredView: 'system' | 'reactflow';
         },
         modelTag: string,
+        mode: ProcessingMode = 'fast',
     ): Promise<{
         title: string;
         steps: Array<{ targetNodeId: string; narration: string; action: 'focus' | 'highlight' | 'zoom' }>;
     }> {
-        // Narration is a small auxiliary task — hard-cap tokens so it never
-        // dominates the user's chat latency budget. Use the "fast" profile.
-        const profile = getProcessingProfile('fast');
+        // Derive from the user's chosen profile but clamp heavy parameters so
+        // narration never dominates the model's time budget. thinking tokens are
+        // never needed here — we want fast, stable JSON output.
+        const base = getProcessingProfile(mode);
+        const profile: ProcessingProfile = {
+            ...base,
+            numPredict: Math.min(base.numPredict, 700),
+            numCtx: Math.min(base.numCtx, 4096),
+            think: false,
+            temperature: Math.min(base.temperature + 0.05, 0.2),
+        };
         const MAX_NODES = 60;
         const nodeList = input.nodes.slice(0, MAX_NODES);
         const nodeLines = nodeList
@@ -267,17 +302,29 @@ export class OllamaService {
             `\nUser question:\n${input.question.slice(0, 600)}\n` +
             `\nAssistant answer:\n${input.answer.slice(0, 2000)}\n` +
             `\nAvailable nodes (id :: label):\n${nodeLines}\n` +
-            `\nReturn ONLY minified JSON matching this exact shape, no prose, no markdown fences:\n` +
-            `{"title":"<short 3-6 word title>","steps":[{"targetNodeId":"<id from list>","narration":"<one sentence>","action":"focus|highlight|zoom"}]}\n` +
+            `\nReturn ONLY a valid JSON object — no prose, no markdown fences, no explanation:\n` +
+            `{"title":"<short 3-6 word title>","steps":[{"targetNodeId":"<id from list>","narration":"<one plain-text sentence, no LaTeX>","action":"focus"}]}\n` +
             `Rules:\n` +
-            `- 3 to 7 steps maximum.\n` +
+            `- 2 to 10 steps.\n` +
             `- Every targetNodeId must exactly match an id from the list above.\n` +
             `- action must be one of: focus, highlight, zoom.\n` +
-            `- narration must be a single plain-text sentence, <= 180 chars.\n` +
-            `- Do NOT include any text outside the JSON object.`;
+            `- narration must be plain English, <= 180 chars, no special symbols.\n` +
+            `- Output the JSON object only. No text before or after it.`;
 
-        const raw = await this.generate(modelTag, prompt, { ...profile, numPredict: 600 });
-        return this.parseNarrationResponse(raw, new Set(nodeList.map(n => n.id)));
+        const validIds = new Set(nodeList.map(n => n.id));
+
+        // Retry once on empty/invalid parse — the model occasionally emits a
+        // preamble on the first attempt that breaks JSON extraction.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const raw = await this.generate(modelTag, prompt, profile, undefined, { format: 'json' });
+            const result = this.parseNarrationResponse(raw, validIds);
+            if (result.steps.length > 0) return result;
+            if (attempt === 0) {
+                // Brief pause so the model runtime settles before the retry.
+                await new Promise<void>(r => setTimeout(r, 300));
+            }
+        }
+        return { title: 'Architecture walkthrough', steps: [] };
     }
 
     private parseNarrationResponse(
@@ -321,7 +368,7 @@ export class OllamaService {
                 actionRaw === 'highlight' || actionRaw === 'zoom' ? actionRaw : 'focus';
             if (!targetNodeId || !narration) continue;
             if (!validIds.has(targetNodeId)) continue; // drop hallucinated ids
-            steps.push({ targetNodeId, narration: narration.slice(0, 240), action });
+            steps.push({ targetNodeId, narration: sanitizeNarration(narration).slice(0, 240), action });
             if (steps.length >= 7) break;
         }
         return { title, steps };
@@ -552,7 +599,8 @@ GUIDELINES:
         model: string,
         prompt: string,
         profile: ProcessingProfile,
-        onChunk?: (text: string) => void
+        onChunk?: (text: string) => void,
+        extraBodyFields?: Record<string, unknown>
     ): Promise<string> {
         return new Promise((resolve, reject) => {
             const body = JSON.stringify({
@@ -567,6 +615,7 @@ GUIDELINES:
                     top_k: profile.topK,
                     top_p: profile.topP,
                 },
+                ...extraBodyFields,
             });
 
             const url = new URL(`${OLLAMA_BASE}/api/generate`);

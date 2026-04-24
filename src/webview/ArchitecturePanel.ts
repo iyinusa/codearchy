@@ -443,7 +443,15 @@ export class ArchitecturePanel {
       const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
       if (!modelOpt) return;
       if (!this.currentGraph && !this.currentSystemArch) return;
-      if (!(await this.ollamaService.isAvailable())) return;
+
+      // Skip the isAvailable() check here — Ollama may still be processing
+      // the preceding chat response and will report "unavailable" even though
+      // it can queue a second request just fine.  We rely on the HTTP timeout
+      // inside generate() to handle genuine outages.
+
+      // Small delay so the chat-completion response is fully drained before
+      // we issue the narration request, reducing queue contention on the model.
+      await new Promise<void>((r) => setTimeout(r, 500));
 
       // Prefer the system architecture (fewer, higher-level nodes = better
       // narration grounding). Fall back to the codebase graph otherwise.
@@ -476,6 +484,7 @@ export class ArchitecturePanel {
       const result = await this.ollamaService.generateNarration(
         { question: payload.question, answer: payload.answer, nodes, preferredView },
         modelOpt.ollamaTag,
+        this.processingMode,
       );
 
       if (!result.steps.length) return;

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import type { ArchitectureGraph, ProcessingMode } from '../types';
 import type { NarratorRecord } from '../db';
 import { deleteNarrator, updateNarratorTitle } from '../db';
@@ -57,6 +57,16 @@ export function Sidebar({
     const [narratorSearch, setNarratorSearch] = useState('');
     const [editingId, setEditingId] = useState<number | null>(null);
     const [editingTitle, setEditingTitle] = useState('');
+    const stepsContainerRef = useRef<HTMLDivElement>(null);
+
+    // Scroll the active narrator step into view whenever it changes.
+    useEffect(() => {
+        if (!stepsContainerRef.current) return;
+        const active = stepsContainerRef.current.querySelector(
+            '.narrator-step.active'
+        ) as HTMLElement | null;
+        active?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, [narratorStepIndex, activeNarratorId]);
 
     // Active narrator floats to the top; everything else stays in
     // updatedAt-desc order (which is how listNarrators already returns them).
@@ -304,7 +314,7 @@ export function Sidebar({
                                                     />
                                                 </div>
                                             </div>
-                                            <div className="narrator-steps">
+                                            <div className="narrator-steps" ref={stepsContainerRef}>
                                                 {rec.steps.map((step, i) => (
                                                     <button
                                                         key={i}
