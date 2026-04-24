@@ -11,6 +11,7 @@ export class ArchitecturePanel {
   private readonly extensionUri: vscode.Uri;
   private disposables: vscode.Disposable[] = [];
   private currentGraph: ArchitectureGraph | undefined;
+  private currentSystemArch: SystemArchitecture | undefined;
   private ollamaService: OllamaService;
   private selectedModel: string | null = null;
   private processingMode: ProcessingMode = 'moderate';
@@ -196,6 +197,19 @@ export class ArchitecturePanel {
       case WebviewMessageType.StopVoiceRecording:
         this.handleStopVoiceRecording();
         break;
+
+      case WebviewMessageType.GenerateNarrator: {
+        const narratorPayload = message.payload as {
+          question: string;
+          answer: string;
+          messageTimestamp?: number;
+        };
+        if (narratorPayload && narratorPayload.question && narratorPayload.answer) {
+          // Intentionally not awaited — narrator runs silently in the background.
+          this.handleGenerateNarrator(narratorPayload);
+        }
+        break;
+      }
     }
   }
 
@@ -360,6 +374,7 @@ export class ArchitecturePanel {
       });
 
       const fallbackArch = this.buildFallbackArchitecture(this.currentGraph);
+      this.currentSystemArch = fallbackArch;
       this.panel.webview.postMessage({
         type: WebviewMessageType.SystemArchData,
         payload: fallbackArch,
@@ -399,6 +414,8 @@ export class ArchitecturePanel {
         this.processingMode
       );
 
+      this.currentSystemArch = architecture;
+
       this.panel.webview.postMessage({
         type: WebviewMessageType.SystemArchData,
         payload: architecture,
@@ -410,6 +427,71 @@ export class ArchitecturePanel {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.sendError(`Architecture generation failed: ${msg}`);
+    }
+  }
+
+  // --- Narrator Handler ---
+
+  private async handleGenerateNarrator(payload: {
+    question: string;
+    answer: string;
+    messageTimestamp?: number;
+  }) {
+    // Fire-and-forget. Any failure is logged but never surfaced — narration
+    // is an enhancement layer on top of the chat response.
+    try {
+      const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
+      if (!modelOpt) return;
+      if (!this.currentGraph && !this.currentSystemArch) return;
+      if (!(await this.ollamaService.isAvailable())) return;
+
+      // Prefer the system architecture (fewer, higher-level nodes = better
+      // narration grounding). Fall back to the codebase graph otherwise.
+      const preferSystem = !!this.currentSystemArch && this.currentSystemArch.nodes.length > 0;
+      const nodes = preferSystem
+        ? this.currentSystemArch!.nodes.map((n) => ({
+          id: n.id,
+          label: n.label,
+          description: n.description,
+        }))
+        : (this.currentGraph?.subsystems ?? []).map((s) => ({
+          id: s.id,
+          label: s.name,
+          description: s.description,
+        }));
+
+      if (nodes.length === 0 && this.currentGraph) {
+        for (const n of this.currentGraph.nodes.slice(0, 80)) {
+          nodes.push({
+            id: n.id,
+            label: n.label,
+            description: (n.metadata?.language as string) || '',
+          });
+        }
+      }
+
+      if (nodes.length === 0) return;
+
+      const preferredView: 'system' | 'reactflow' = preferSystem ? 'system' : 'reactflow';
+      const result = await this.ollamaService.generateNarration(
+        { question: payload.question, answer: payload.answer, nodes, preferredView },
+        modelOpt.ollamaTag,
+      );
+
+      if (!result.steps.length) return;
+
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.NarratorGenerated,
+        payload: {
+          title: result.title,
+          question: payload.question,
+          steps: result.steps,
+          preferredView,
+          messageTimestamp: payload.messageTimestamp,
+        },
+      });
+    } catch (err) {
+      console.warn('[CodeArchy] narrator generation failed', err);
     }
   }
 

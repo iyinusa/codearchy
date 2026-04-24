@@ -142,6 +142,12 @@ export enum WebviewMessageType {
     StopVoiceRecording = 'stopVoiceRecording',
     VoiceRecordingState = 'voiceRecordingState',
     VoiceTranscript = 'voiceTranscript',
+    // Narrator (story-player timeline generation)
+    /** Webview → host: silently produce a narrator timeline for the given
+     *  assistant response. The host streams back a NarratorGenerated payload
+     *  when ready — never blocking the chat UI. */
+    GenerateNarrator = 'generateNarrator',
+    NarratorGenerated = 'narratorGenerated',
 }
 
 export interface AnalysisProgress {

@@ -207,6 +207,29 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         autoSpeakOnNextReplyRef.current = false;
                         speakNow(response.content);
                     }
+                    // Fire-and-forget narrator generation: ask the host to
+                    // silently produce a story-player timeline for this Q&A.
+                    // The host answers back with a `narratorGenerated` event
+                    // that App.tsx persists; failures are swallowed upstream.
+                    try {
+                        const history = messagesRef.current;
+                        let lastUser = '';
+                        let answerTs = Date.now();
+                        for (let i = history.length - 1; i >= 0; i--) {
+                            const m = history[i];
+                            if (m.role === 'assistant' && !m.isStreaming) answerTs = m.timestamp;
+                            if (m.role === 'user') { lastUser = m.content; break; }
+                        }
+                        if (lastUser && response.content) {
+                            postMessage('generateNarrator', {
+                                question: lastUser,
+                                answer: response.content,
+                                messageTimestamp: answerTs,
+                            });
+                        }
+                    } catch {
+                        /* narrator generation is best-effort */
+                    }
                     break;
                 }
                 case 'chatThinking': {

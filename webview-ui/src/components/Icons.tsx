@@ -65,6 +65,13 @@ import {
     faCompress,          // Collapse panel
     faSpinner,           // Loading spinner
     faWandMagicSparkles, // AI magic (alternate AI icon)
+    faPlay,              // Play narration
+    faPause,             // Pause narration
+    faPenToSquare,       // Edit narrator title
+    faMagnifyingGlass,   // Search narrators
+    faForwardStep,       // Next narrator step
+    faBackwardStep,      // Previous narrator step
+    faBookOpenReader,    // Narrator section header icon
 } from '@fortawesome/free-solid-svg-icons';
 
 // ---------------------------------------------------------------------------
@@ -87,6 +94,7 @@ export const AppIcons: Record<string, IconDefinition> = {
     // ---- Chat panel ----
     chatFab: faComments,
     clearChat: faTrash,
+    trash: faTrash,
     minimize: faChevronDown,
     close: faXmark,
     voiceInput: faMicrophone,
@@ -126,6 +134,15 @@ export const AppIcons: Record<string, IconDefinition> = {
     spinner: faSpinner,
     aiMagic: faWandMagicSparkles,
     check: faCheck,
+
+    // ---- Narrator ----
+    narrator: faBookOpenReader,
+    play: faPlay,
+    pause: faPause,
+    edit: faPenToSquare,
+    search: faMagnifyingGlass,
+    nextStep: faForwardStep,
+    prevStep: faBackwardStep,
 } as const;
 
 export type AppIconName = keyof typeof AppIcons;

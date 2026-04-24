@@ -43,11 +43,13 @@ import {
 export interface SystemViewHandle {
     exportSVG(): string | null;
     exportPNG(): Promise<string | null>;
+    focusNode(nodeId: string, action?: 'focus' | 'highlight' | 'zoom'): boolean;
 }
 
 interface SystemViewProps {
     architecture: SystemArchitecture;
     showMiniMap: boolean;
+    narratedNodeId?: string | null;
 }
 
 // -------------------------------------------------------------------------
@@ -273,6 +275,7 @@ function SystemNode({ data, selected }: NodeProps) {
         childCount: number;
         dimmed: boolean;
         shape: NodeShape;
+        narrated?: boolean;
     };
 
     const iconName = SHAPE_ICONS[nodeData.shape] ?? 'nodeSubsystem';
@@ -280,7 +283,7 @@ function SystemNode({ data, selected }: NodeProps) {
 
     return (
         <div
-            className={`system-node shape-${nodeData.shape} ${selected ? 'selected' : ''} ${nodeData.dimmed ? 'dimmed' : ''}`}
+            className={`system-node shape-${nodeData.shape} ${selected ? 'selected' : ''} ${nodeData.dimmed ? 'dimmed' : ''} ${nodeData.narrated ? 'narrator-active' : ''}`}
             style={{ ['--node-accent' as any]: nodeData.color }}
         >
             <ShapeBackground shape={nodeData.shape} color={nodeData.color} />
@@ -329,6 +332,7 @@ const nodeTypes: NodeTypes = {
 function SystemViewInner({
     architecture,
     showMiniMap,
+    narratedNodeId,
     forwardedRef,
 }: SystemViewProps & { forwardedRef?: React.Ref<SystemViewHandle> }) {
     const { rawNodes, rawEdges } = useMemo(
@@ -340,7 +344,7 @@ function SystemViewInner({
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [isLayouting, setIsLayouting] = useState(false);
     const [selectedId, setSelectedId] = useState<string | null>(null);
-    const { fitView } = useReactFlow();
+    const { fitView, setCenter } = useReactFlow();
     const projectId = useProjectId();
 
     useEffect(() => {
@@ -441,13 +445,18 @@ function SystemViewInner({
             curr.map(n => {
                 const isSelected = n.id === selectedId;
                 const dimmed = !!(connectedIds && !connectedIds.has(n.id));
-                if ((n.data as any).dimmed === dimmed && n.selected === isSelected) {
+                const narrated = !!narratedNodeId && n.id === narratedNodeId;
+                if (
+                    (n.data as any).dimmed === dimmed &&
+                    n.selected === isSelected &&
+                    (n.data as any).narrated === narrated
+                ) {
                     return n;
                 }
                 return {
                     ...n,
                     selected: isSelected,
-                    data: { ...n.data, dimmed },
+                    data: { ...n.data, dimmed, narrated },
                 };
             })
         );
@@ -477,7 +486,7 @@ function SystemViewInner({
                 };
             })
         );
-    }, [selectedId, connectedIds, setNodes, setEdges]);
+    }, [selectedId, connectedIds, setNodes, setEdges, narratedNodeId]);
 
     const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
         setSelectedId(prev => (prev === node.id ? null : node.id));
@@ -568,8 +577,19 @@ function SystemViewInner({
                     svgToPngBase64(svg, base64 => resolve(base64));
                 });
             },
+            focusNode(nodeId: string, action: 'focus' | 'highlight' | 'zoom' = 'focus'): boolean {
+                const node = nodesRef.current.find(n => n.id === nodeId);
+                if (!node) return false;
+                const width = (node as { width?: number }).width ?? 240;
+                const height = (node as { height?: number }).height ?? 140;
+                const cx = node.position.x + width / 2;
+                const cy = node.position.y + height / 2;
+                const zoom = action === 'zoom' ? 1.4 : action === 'highlight' ? 1.05 : 1.2;
+                setCenter(cx, cy, { zoom, duration: 700 });
+                return true;
+            },
         }),
-        []
+        [setCenter]
     );
 
     return (

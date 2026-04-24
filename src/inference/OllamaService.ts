@@ -237,6 +237,96 @@ export class OllamaService {
         return response;
     }
 
+    /** Produce a narrator timeline from an assistant response, grounded in the
+     *  available node ids. Runs silently — the Webview renders the result as
+     *  an animated Story Player. Uses the same Ollama model but a focused
+     *  prompt + small token budget so it never blocks the chat UI. */
+    async generateNarration(
+        input: {
+            question: string;
+            answer: string;
+            nodes: Array<{ id: string; label: string; description?: string }>;
+            preferredView: 'system' | 'reactflow';
+        },
+        modelTag: string,
+    ): Promise<{
+        title: string;
+        steps: Array<{ targetNodeId: string; narration: string; action: 'focus' | 'highlight' | 'zoom' }>;
+    }> {
+        // Narration is a small auxiliary task — hard-cap tokens so it never
+        // dominates the user's chat latency budget. Use the "fast" profile.
+        const profile = getProcessingProfile('fast');
+        const MAX_NODES = 60;
+        const nodeList = input.nodes.slice(0, MAX_NODES);
+        const nodeLines = nodeList
+            .map(n => `- ${n.id} :: ${n.label}${n.description ? ' — ' + n.description.slice(0, 140) : ''}`)
+            .join('\n');
+
+        const prompt =
+            `You are an architecture narrator. Convert the assistant's answer into a short visual walkthrough.\n` +
+            `\nUser question:\n${input.question.slice(0, 600)}\n` +
+            `\nAssistant answer:\n${input.answer.slice(0, 2000)}\n` +
+            `\nAvailable nodes (id :: label):\n${nodeLines}\n` +
+            `\nReturn ONLY minified JSON matching this exact shape, no prose, no markdown fences:\n` +
+            `{"title":"<short 3-6 word title>","steps":[{"targetNodeId":"<id from list>","narration":"<one sentence>","action":"focus|highlight|zoom"}]}\n` +
+            `Rules:\n` +
+            `- 3 to 7 steps maximum.\n` +
+            `- Every targetNodeId must exactly match an id from the list above.\n` +
+            `- action must be one of: focus, highlight, zoom.\n` +
+            `- narration must be a single plain-text sentence, <= 180 chars.\n` +
+            `- Do NOT include any text outside the JSON object.`;
+
+        const raw = await this.generate(modelTag, prompt, { ...profile, numPredict: 600 });
+        return this.parseNarrationResponse(raw, new Set(nodeList.map(n => n.id)));
+    }
+
+    private parseNarrationResponse(
+        raw: string,
+        validIds: Set<string>,
+    ): {
+        title: string;
+        steps: Array<{ targetNodeId: string; narration: string; action: 'focus' | 'highlight' | 'zoom' }>;
+    } {
+        // The model sometimes wraps JSON in ```json fences or adds stray prose.
+        // Extract the outermost {...} block defensively.
+        let text = raw.trim();
+        const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+        if (fence) text = fence[1].trim();
+        const firstBrace = text.indexOf('{');
+        const lastBrace = text.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            text = text.slice(firstBrace, lastBrace + 1);
+        }
+
+        let parsed: { title?: string; steps?: unknown };
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            return { title: 'Architecture walkthrough', steps: [] };
+        }
+
+        const title = typeof parsed.title === 'string' && parsed.title.trim()
+            ? parsed.title.trim().slice(0, 80)
+            : 'Architecture walkthrough';
+
+        const stepsRaw = Array.isArray(parsed.steps) ? parsed.steps : [];
+        const steps: Array<{ targetNodeId: string; narration: string; action: 'focus' | 'highlight' | 'zoom' }> = [];
+        for (const s of stepsRaw) {
+            if (!s || typeof s !== 'object') continue;
+            const step = s as Record<string, unknown>;
+            const targetNodeId = typeof step.targetNodeId === 'string' ? step.targetNodeId : '';
+            const narration = typeof step.narration === 'string' ? step.narration.trim() : '';
+            const actionRaw = typeof step.action === 'string' ? step.action : 'focus';
+            const action: 'focus' | 'highlight' | 'zoom' =
+                actionRaw === 'highlight' || actionRaw === 'zoom' ? actionRaw : 'focus';
+            if (!targetNodeId || !narration) continue;
+            if (!validIds.has(targetNodeId)) continue; // drop hallucinated ids
+            steps.push({ targetNodeId, narration: narration.slice(0, 240), action });
+            if (steps.length >= 7) break;
+        }
+        return { title, steps };
+    }
+
     /** Transcribe user-recorded audio using local Ollama + Gemma. */
     async transcribeAudio(audioBase64: string, mimeType: string, modelTag: string): Promise<string> {
         const format = this.getAudioFormatFromMime(mimeType);

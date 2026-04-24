@@ -6,6 +6,8 @@ import {
     CytoscapeRecord,
     SystemRecord,
     ConversationMessageRecord,
+    NarratorRecord,
+    NarratorStepRecord,
 } from './database';
 import type { ArchitectureGraph, SystemArchitecture } from '../types';
 
@@ -243,4 +245,47 @@ export async function deleteConversationMessage(id: number): Promise<void> {
 
 export async function clearConversation(projectId: string): Promise<void> {
     await db.conversations.where('projectId').equals(projectId).delete();
+}
+
+// ------------------------------------------------------------------
+// Narrators (AI-generated story-player timelines)
+// ------------------------------------------------------------------
+
+export async function listNarrators(projectId: string): Promise<NarratorRecord[]> {
+    const all = await db.narrators.where('projectId').equals(projectId).toArray();
+    return all.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function getNarrator(id: number): Promise<NarratorRecord | undefined> {
+    return db.narrators.get(id);
+}
+
+export async function createNarrator(
+    projectId: string,
+    data: Omit<NarratorRecord, 'id' | 'projectId' | 'createdAt' | 'updatedAt'>,
+): Promise<number> {
+    const now = Date.now();
+    const id = await db.narrators.add({
+        projectId,
+        title: data.title,
+        question: data.question,
+        steps: data.steps,
+        preferredView: data.preferredView,
+        messageTimestamp: data.messageTimestamp,
+        createdAt: now,
+        updatedAt: now,
+    });
+    return id as number;
+}
+
+export async function updateNarratorTitle(id: number, title: string): Promise<void> {
+    await db.narrators.update(id, { title, updatedAt: Date.now() });
+}
+
+export async function updateNarratorSteps(id: number, steps: NarratorStepRecord[]): Promise<void> {
+    await db.narrators.update(id, { steps, updatedAt: Date.now() });
+}
+
+export async function deleteNarrator(id: number): Promise<void> {
+    await db.narrators.delete(id);
 }
