@@ -190,6 +190,18 @@ export class ArchitecturePanel {
         break;
       }
 
+      case WebviewMessageType.SyncSystemArch: {
+        // The webview loaded a cached system architecture from IndexedDB and
+        // is pushing it here so subsequent chat messages have subsystem data
+        // even without re-running AI generation.
+        const payload = message.payload as { architecture: SystemArchitecture };
+        if (payload?.architecture) {
+          this.currentSystemArch = payload.architecture;
+          this.ollamaService.setSystemArchitecture(payload.architecture);
+        }
+        break;
+      }
+
       case WebviewMessageType.StartVoiceRecording:
         this.handleStartVoiceRecording();
         break;

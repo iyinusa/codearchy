@@ -161,7 +161,14 @@ export function App() {
                                     // Only hydrate if the current session has
                                     // no system arch yet — don't clobber a
                                     // freshly generated architecture.
-                                    setSystemArch(prev => prev ?? cached.architecture);
+                                    setSystemArch(prev => {
+                                        if (prev) return prev;
+                                        // Sync to extension host so the chat
+                                        // system prompt has the subsystem data
+                                        // even after a webview reload.
+                                        postMessage('syncSystemArch', { architecture: cached.architecture });
+                                        return cached.architecture;
+                                    });
                                 }
                             } catch (e) {
                                 console.error('[CodeArchy] failed to hydrate project', e);
