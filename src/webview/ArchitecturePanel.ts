@@ -16,10 +16,12 @@ export class ArchitecturePanel {
   private selectedModel: string | null = null;
   private processingMode: ProcessingMode = 'moderate';
   private hostRecorder: HostAudioRecorder = new HostAudioRecorder();
+  private extensionContext: vscode.ExtensionContext;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
     this.panel = panel;
     this.extensionUri = extensionUri;
+    this.extensionContext = context;
     this.ollamaService = new OllamaService();
 
     // Load saved model selection
@@ -39,7 +41,8 @@ export class ArchitecturePanel {
     );
   }
 
-  static createOrShow(extensionUri: vscode.Uri, graph: ArchitectureGraph) {
+  static createOrShow(context: vscode.ExtensionContext, graph: ArchitectureGraph) {
+    const extensionUri = context.extensionUri;
     const column = vscode.ViewColumn.Beside;
 
     if (ArchitecturePanel.instance) {
@@ -62,7 +65,7 @@ export class ArchitecturePanel {
       }
     );
 
-    ArchitecturePanel.instance = new ArchitecturePanel(panel, extensionUri);
+    ArchitecturePanel.instance = new ArchitecturePanel(panel, extensionUri, context);
     ArchitecturePanel.instance.panel.iconPath = new vscode.ThemeIcon('type-hierarchy');
     ArchitecturePanel.instance.panel.webview.html = ArchitecturePanel.instance.getWebviewContent();
     ArchitecturePanel.instance.currentGraph = graph;
@@ -209,6 +212,15 @@ export class ArchitecturePanel {
       case WebviewMessageType.StopVoiceRecording:
         this.handleStopVoiceRecording();
         break;
+
+      case WebviewMessageType.VoiceConfigPersist: {
+        const vcPayload = message.payload as { kokoroActivated?: boolean };
+        if (vcPayload && typeof vcPayload === 'object') {
+          const current = (this.extensionContext.globalState.get<object>('codearchy.voiceConfig') ?? {}) as Record<string, unknown>;
+          this.extensionContext.globalState.update('codearchy.voiceConfig', { ...current, ...vcPayload });
+        }
+        break;
+      }
 
       case WebviewMessageType.GenerateNarrator: {
         const narratorPayload = message.payload as {
@@ -740,7 +752,7 @@ export class ArchitecturePanel {
 </head>
 <body>
   <div id="root"></div>
-  <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}";</script>
+  <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}"; window.__CODEARCHY_VOICE_CONFIG = ${JSON.stringify(this.extensionContext.globalState.get<object>('codearchy.voiceConfig') ?? {})};</script>
   <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

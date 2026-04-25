@@ -38,7 +38,7 @@ export function activate(context: vscode.ExtensionContext) {
                 await runAnalysis(context);
             }
             if (currentGraph) {
-                ArchitecturePanel.createOrShow(context.extensionUri, currentGraph);
+                ArchitecturePanel.createOrShow(context, currentGraph);
             }
         }
     );

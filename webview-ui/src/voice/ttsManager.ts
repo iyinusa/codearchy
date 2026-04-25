@@ -112,10 +112,10 @@ function speakWebSpeech(text: string, opts: EngineOptions): void {
 async function speakKokoro(text: string, opts: EngineOptions): Promise<void> {
     // Dynamic import → esbuild emits this as a separate chunk.
     const mod = await import('./kokoroEngine');
+    // Auto-reload from cache if the engine chunk was freshly loaded after a
+    // webview reload (weights are cached; this is fast).
     if (!mod.isKokoroLoaded()) {
-        const err = new Error('Kokoro TTS is not loaded yet.');
-        opts.onError?.(err);
-        return;
+        await mod.loadKokoro();
     }
     activeStop = () => mod.stopKokoro();
     setSpeaking(true);

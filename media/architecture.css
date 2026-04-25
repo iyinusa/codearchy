@@ -1521,6 +1521,41 @@ body {
     font-size: 12px;
 }
 
+.kokoro-deactivate {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+    flex-wrap: wrap;
+}
+
+.kokoro-remove-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    background: rgba(244, 67, 54, 0.1);
+    color: #e57373;
+    border: 1px solid rgba(244, 67, 54, 0.25);
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+}
+
+.kokoro-remove-btn:hover {
+    background: rgba(244, 67, 54, 0.2);
+}
+
+.kokoro-remove-hint {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.75;
+}
+
 /* ===== Chat Panel ===== */
 .chat-fab {
     position: fixed;

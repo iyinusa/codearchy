@@ -9,28 +9,69 @@
  */
 
 // `kokoro-js` ships its own type declarations.
-import { KokoroTTS } from 'kokoro-js';
+import { KokoroTTS, env } from 'kokoro-js';
 import { KOKORO_MODEL_ID, KOKORO_DTYPE, DEFAULT_KOKORO_VOICE } from './kokoroVoices';
+
+// Offload ONNX inference to a proxy Web Worker so the React UI never freezes.
+// This must be set BEFORE the first KokoroTTS.from_pretrained() call.
+try {
+    // The kokoro-js `env` export only exposes wasmPaths; the full
+    // transformers.js env with backends is available via type cast.
+    (env as unknown as { backends: { onnx: { wasm: { proxy: boolean } } } })
+        .backends.onnx.wasm.proxy = true;
+} catch {
+    /* non-critical — falls back to main-thread inference */
+}
 
 let ttsInstance: KokoroTTS | null = null;
 let loadingPromise: Promise<void> | null = null;
 
-let currentAudio: HTMLAudioElement | null = null;
-let currentObjectUrl: string | null = null;
+// AudioContext-based playback (supported in VS Code webviews; avoids CSP
+// restrictions that can affect HTMLAudioElement).
+let currentSource: AudioBufferSourceNode | null = null;
+let currentAudioCtx: AudioContext | null = null;
 
 export type ProgressCallback = (info: { phase: string; percent?: number }) => void;
 
 function cleanupAudio(): void {
-    if (currentAudio) {
-        try {
-            currentAudio.pause();
-            currentAudio.src = '';
-        } catch { /* ignore */ }
-        currentAudio = null;
+    if (currentSource) {
+        currentSource.onended = null;
+        try { currentSource.stop(); } catch { /* already stopped */ }
+        currentSource = null;
     }
-    if (currentObjectUrl) {
-        try { URL.revokeObjectURL(currentObjectUrl); } catch { /* ignore */ }
-        currentObjectUrl = null;
+    if (currentAudioCtx) {
+        try { void currentAudioCtx.close(); } catch { /* ignore */ }
+        currentAudioCtx = null;
+    }
+}
+
+async function playWav(
+    wav: ArrayBuffer,
+    onEnd?: () => void,
+    onError?: (err: unknown) => void,
+): Promise<void> {
+    cleanupAudio();
+    try {
+        const ctx = new AudioContext();
+        currentAudioCtx = ctx;
+        // decodeAudioData is async — does not block the main thread.
+        const buffer = await ctx.decodeAudioData(wav.slice(0));
+        if (!currentAudioCtx) { onEnd?.(); return; } // stopped before decode finished
+        const source = ctx.createBufferSource();
+        currentSource = source;
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        return new Promise<void>((resolve) => {
+            source.onended = () => {
+                cleanupAudio();
+                onEnd?.();
+                resolve();
+            };
+            source.start();
+        });
+    } catch (err) {
+        cleanupAudio();
+        onError?.(err);
     }
 }
 
@@ -95,41 +136,18 @@ export async function kokoroSpeak(text: string, options: KokoroSpeakOptions = {}
 
     stopKokoro();
 
-    let audioBlob: Blob;
     try {
-        const audio = await ttsInstance.generate(text, { voice: voice as Parameters<typeof ttsInstance.generate>[1]['voice'] });
-        // RawAudio in kokoro-js exposes both toBlob() and toWav(); prefer Blob.
-        const maybeBlob = (audio as unknown as { toBlob?: () => Blob }).toBlob?.();
-        if (maybeBlob instanceof Blob) {
-            audioBlob = maybeBlob;
-        } else {
-            const wav = (audio as unknown as { toWav: () => ArrayBuffer | Uint8Array }).toWav();
-            audioBlob = new Blob([wav as BlobPart], { type: 'audio/wav' });
-        }
+        // generate() runs ONNX inference in the proxy worker — non-blocking.
+        const audio = await ttsInstance.generate(text, {
+            voice: (voice ?? DEFAULT_KOKORO_VOICE) as NonNullable<Parameters<typeof ttsInstance.generate>[1]>['voice'],
+        });
+        // toWav() returns an ArrayBuffer; AudioContext.decodeAudioData handles it.
+        const wav = audio.toWav() as ArrayBuffer;
+        await playWav(wav, onEnd, onError);
     } catch (err) {
         onError?.(err);
         throw err;
     }
-
-    currentObjectUrl = URL.createObjectURL(audioBlob);
-    currentAudio = new Audio(currentObjectUrl);
-
-    return new Promise<void>((resolve) => {
-        if (!currentAudio) { resolve(); return; }
-        const finish = () => {
-            cleanupAudio();
-            onEnd?.();
-            resolve();
-        };
-        const fail = (e: unknown) => {
-            cleanupAudio();
-            onError?.(e);
-            resolve();
-        };
-        currentAudio.onended = finish;
-        currentAudio.onerror = fail;
-        currentAudio.play().catch(fail);
-    });
 }
 
 export function stopKokoro(): void {

@@ -152,6 +152,9 @@ export enum WebviewMessageType {
      *  when ready — never blocking the chat UI. */
     GenerateNarrator = 'generateNarrator',
     NarratorGenerated = 'narratorGenerated',
+    /** Webview → host: persist voice configuration (e.g. kokoroActivated) in
+     *  extension-host globalState so it survives full webview reloads. */
+    VoiceConfigPersist = 'voiceConfigPersist',
 }
 
 export interface AnalysisProgress {

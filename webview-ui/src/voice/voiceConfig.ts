@@ -44,6 +44,7 @@ let cached: VoiceConfig | null = null;
 const listeners = new Set<(cfg: VoiceConfig) => void>();
 
 function readState(): VoiceConfig {
+    // 1. VS Code webview session state (survives hide/show in same session).
     try {
         const api = getVsCodeApi();
         const state = api.getState() as Record<string, unknown> | undefined;
@@ -53,6 +54,16 @@ function readState(): VoiceConfig {
         }
     } catch {
         /* ignore — fall through to default */
+    }
+    // 2. Value injected by the extension host from globalState — survives
+    //    full extension reloads (webview recreated from scratch).
+    try {
+        const injected = (window as Window & { __CODEARCHY_VOICE_CONFIG?: Partial<VoiceConfig> }).__CODEARCHY_VOICE_CONFIG;
+        if (injected && typeof injected === 'object') {
+            return { ...DEFAULT_CONFIG, ...injected };
+        }
+    } catch {
+        /* ignore */
     }
     return { ...DEFAULT_CONFIG };
 }
@@ -78,6 +89,16 @@ export function setVoiceConfig(patch: Partial<VoiceConfig>): VoiceConfig {
     const next = { ...getVoiceConfig(), ...patch };
     cached = next;
     writeState(next);
+    // Persist to extension host globalState so the flag survives reloads.
+    try {
+        const api = getVsCodeApi();
+        (api as typeof api & { postMessage: (msg: unknown) => void }).postMessage({
+            type: 'voiceConfigPersist',
+            payload: { kokoroActivated: next.kokoroActivated },
+        });
+    } catch {
+        /* best-effort */
+    }
     listeners.forEach((l) => {
         try { l(next); } catch { /* swallow listener errors */ }
     });

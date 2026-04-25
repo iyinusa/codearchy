@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NarratorStep } from '../types';
+import { speak as ttsSpeak, stopSpeaking } from '../voice/ttsManager';
 
 /**
  * useStoryPlayer — drives a narrator timeline silently in memory.
@@ -45,7 +46,6 @@ export function useStoryPlayer(
     const statusRef = useRef<StoryPlayerState['status']>('idle');
     const autoSpeakRef = useRef<boolean>(true);
     const timerRef = useRef<number | null>(null);
-    const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
     const stepIndexRef = useRef<number>(0);
     const onStepRef = useRef(onStep);
     onStepRef.current = onStep;
@@ -58,16 +58,7 @@ export function useStoryPlayer(
     };
 
     const cancelSpeech = () => {
-        if (utteranceRef.current) {
-            utteranceRef.current.onend = null;
-            utteranceRef.current.onerror = null;
-            utteranceRef.current = null;
-        }
-        try {
-            window.speechSynthesis.cancel();
-        } catch {
-            /* no-op */
-        }
+        stopSpeaking();
     };
 
     const runStep = useCallback((index: number) => {
@@ -98,24 +89,17 @@ export function useStoryPlayer(
             runStep(stepIndexRef.current + 1);
         };
 
-        if (autoSpeakRef.current && 'speechSynthesis' in window) {
-            const u = new SpeechSynthesisUtterance(step.narration);
-            u.rate = 1.02;
-            u.pitch = 1;
-            u.onend = () => {
-                if (utteranceRef.current === u) utteranceRef.current = null;
-                advance();
-            };
-            u.onerror = () => {
-                if (utteranceRef.current === u) utteranceRef.current = null;
-                advance();
-            };
-            utteranceRef.current = u;
-            try {
-                window.speechSynthesis.speak(u);
-            } catch {
-                utteranceRef.current = null;
-            }
+        if (autoSpeakRef.current) {
+            // Use the unified TTS manager — respects user's engine/voice choice
+            // (Web Speech or Kokoro) rather than always using the system default.
+            void ttsSpeak(step.narration, {
+                onEnd: () => {
+                    advance();
+                },
+                onError: () => {
+                    advance();
+                },
+            });
             timerRef.current = window.setTimeout(advance, estMs + 1200);
         } else {
             timerRef.current = window.setTimeout(advance, estMs);

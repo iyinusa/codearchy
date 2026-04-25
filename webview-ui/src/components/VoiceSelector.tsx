@@ -6,7 +6,7 @@
  * chunk + the one-time download of the ~80 MB ONNX model weights.
  */
 
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { Icon } from './Icons';
 import {
     getVoiceConfig,
@@ -38,9 +38,10 @@ interface KokoroLoadState {
 export function VoiceSelector({ onClose }: VoiceSelectorProps) {
     const [config, setConfig] = useState<VoiceConfig>(() => getVoiceConfig());
     const [webVoices, setWebVoices] = useState<SpeechSynthesisVoice[]>([]);
-    const [kokoroState, setKokoroState] = useState<KokoroLoadState>({
-        status: config.kokoroActivated ? 'idle' : 'idle',
-    });
+    const [kokoroState, setKokoroState] = useState<KokoroLoadState>(
+        // If previously activated, start as 'ready'; we'll lazy-reload from cache below.
+        () => ({ status: config.kokoroActivated ? 'ready' : 'idle' }),
+    );
     const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
     const [activeEngine, setActiveEngine] = useState<VoiceEngineId>(config.engine);
 
@@ -51,6 +52,28 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
             if (!sp) setTestingVoiceId(null);
         });
     }, []);
+
+    // Auto-reload engine from cache when the modal opens and Kokoro is activated.
+    // The model weights are already cached in IndexedDB so this is near-instant.
+    useEffect(() => {
+        if (!config.kokoroActivated) return;
+        void import('../voice/kokoroEngine').then((mod) => {
+            if (mod.isKokoroLoaded()) {
+                setKokoroState({ status: 'ready' });
+                return;
+            }
+            setKokoroState({ status: 'loading', phase: 'Loading model from cache…' });
+            mod.loadKokoro((info) => {
+                setKokoroState({ status: 'loading', phase: info.phase, percent: info.percent });
+            }).then(() => {
+                setKokoroState({ status: 'ready', percent: 100, phase: 'Ready' });
+            }).catch((err: unknown) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                setKokoroState({ status: 'error', error: msg });
+            });
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // run once on mount
 
     // Stop any test speech when the modal closes.
     useEffect(() => {
@@ -137,11 +160,6 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
             setKokoroState({ status: 'error', error: msg });
         }
     }, [kokoroState.status]);
-
-    // Lazily ensure the engine is "ready" if the user previously activated
-    // Kokoro and is reopening the modal. We never force a download here —
-    // the chunk will be cached by the SW/runtime if it loaded before.
-    const reactivateBtnRef = useRef<HTMLButtonElement>(null);
 
     const renderVoiceList = (engine: VoiceEngineId) => {
         const list: VoiceOption[] = engine === 'kokoro' ? KOKORO_VOICES : webVoiceOptions;
@@ -276,7 +294,6 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                     </div>
                                 ) : (
                                     <button
-                                        ref={reactivateBtnRef}
                                         className="btn-retry kokoro-activate-btn"
                                         onClick={handleActivateKokoro}
                                     >
@@ -302,7 +319,28 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                         </div>
                                     </div>
                                 )}
+                                {kokoroState.status === 'error' && (
+                                    <div className="kokoro-error">
+                                        <Icon name="warning" /> {kokoroState.error}
+                                    </div>
+                                )}
                                 {renderVoiceList('kokoro')}
+                                <div className="kokoro-deactivate">
+                                    <button
+                                        className="kokoro-remove-btn"
+                                        onClick={() => {
+                                            stopSpeaking();
+                                            setVoiceConfig({ engine: 'web-speech', kokoroActivated: false, voiceId: null });
+                                            setActiveEngine('web-speech');
+                                            setKokoroState({ status: 'idle' });
+                                        }}
+                                    >
+                                        <Icon name="trash" /> Remove Kokoro TTS
+                                    </button>
+                                    <span className="kokoro-remove-hint">
+                                        Clears activation. Cached model weights stay until storage is cleared.
+                                    </span>
+                                </div>
                             </>
                         )}
                     </div>
