@@ -733,7 +733,7 @@ export class ArchitecturePanel {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: blob:; font-src data:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${webview.cspSource} blob:; img-src ${webview.cspSource} data: blob:; font-src data:; connect-src ${webview.cspSource} http://localhost:* http://127.0.0.1:* https://huggingface.co https://*.huggingface.co https://*.hf.co https://cdn.jsdelivr.net https://cdn-lfs.huggingface.co https://cdn-lfs-us-1.huggingface.co https://cdn-lfs-eu-1.huggingface.co; worker-src blob: ${webview.cspSource}; child-src blob:; media-src ${webview.cspSource} data: blob:;">
   <title>CodeArchy Architecture</title>
   <link rel="stylesheet" href="${cssUri}">
   <link rel="stylesheet" href="${baseStylesUri}">
@@ -741,7 +741,7 @@ export class ArchitecturePanel {
 <body>
   <div id="root"></div>
   <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}";</script>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
+  <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
     }

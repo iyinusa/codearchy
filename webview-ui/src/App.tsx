@@ -11,6 +11,7 @@ import { Sidebar } from './components/Sidebar';
 import { DetailPanel } from './components/DetailPanel';
 import { Toolbar } from './components/Toolbar';
 import { ModelSelector } from './components/ModelSelector';
+import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
@@ -33,6 +34,7 @@ export function App() {
     const [searchTerm, setSearchTerm] = useState('');
     const [showMiniMap, setShowMiniMap] = useState(true);
     const [showModelSelector, setShowModelSelector] = useState(false);
+    const [showVoiceSelector, setShowVoiceSelector] = useState(false);
     const [systemArch, setSystemArch] = useState<SystemArchitecture | null>(null);
     const [isGeneratingArch, setIsGeneratingArch] = useState(false);
     const [archProgress, setArchProgress] = useState<string>('');
@@ -398,6 +400,7 @@ export function App() {
                     showMiniMap={showMiniMap}
                     onToggleMiniMap={() => setShowMiniMap(v => !v)}
                     onOpenModelSelector={() => setShowModelSelector(true)}
+                    onOpenVoiceSelector={() => setShowVoiceSelector(true)}
                     hasSystemArch={!!systemArch}
                     isGeneratingArch={isGeneratingArch}
                     onGenerateSystemArch={handleGenerateSystemArch}
@@ -478,6 +481,11 @@ export function App() {
             {/* Model Selector Modal */}
             {showModelSelector && (
                 <ModelSelector onClose={() => setShowModelSelector(false)} />
+            )}
+
+            {/* Voice Selector Modal */}
+            {showVoiceSelector && (
+                <VoiceSelector onClose={() => setShowVoiceSelector(false)} />
             )}
         </div>
     );

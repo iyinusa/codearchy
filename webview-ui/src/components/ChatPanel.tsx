@@ -10,6 +10,7 @@ import {
     loadConversation,
     useProjectId,
 } from '../db';
+import { speak as ttsSpeak, stopSpeaking, subscribeSpeaking } from '../voice/ttsManager';
 
 interface ChatPanelProps {
     isOpen: boolean;
@@ -121,15 +122,19 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
     const speakNow = useCallback((text: string) => {
         if (!text.trim()) return;
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1;
-        utterance.pitch = 1;
-        utterance.onend = () => setIsSpeaking(false);
-        utterance.onerror = () => setIsSpeaking(false);
-        setIsSpeaking(true);
-        window.speechSynthesis.speak(utterance);
+        // Delegate to the unified TTS manager. It picks the right engine
+        // (Web Speech or lazy-loaded Kokoro) based on the user's voice
+        // configuration. The `subscribeSpeaking` hook below keeps the
+        // speaker icon state in sync regardless of which engine ran.
+        void ttsSpeak(text, {
+            onError: () => setIsSpeaking(false),
+        });
     }, []);
+
+    // Mirror the TTS manager's speaking state into local UI state so the
+    // speaker / stop icon swaps correctly even when Kokoro audio playback
+    // ends asynchronously.
+    useEffect(() => subscribeSpeaking(setIsSpeaking), []);
 
     // Listen for chat responses
     useEffect(() => {
@@ -435,11 +440,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const speakText = useCallback(
         (text: string) => {
             if (isSpeaking) {
-                window.speechSynthesis.cancel();
+                stopSpeaking();
                 setIsSpeaking(false);
                 return;
             }
-
             speakNow(text);
         },
         [isSpeaking, speakNow]

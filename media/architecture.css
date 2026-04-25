@@ -1247,6 +1247,280 @@ body {
     font-size: 11px;
 }
 
+/* ===== Voice Selector ===== */
+.voice-selector {
+    width: 560px;
+}
+
+.voice-engine-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 14px 20px 0;
+}
+
+.voice-engine-tab {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--node-border);
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.voice-engine-tab:hover {
+    border-color: var(--accent);
+}
+
+.voice-engine-tab.active {
+    border-color: #7c4dff;
+    box-shadow: 0 0 0 1px #7c4dff;
+}
+
+.voice-engine-tab-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.voice-engine-tab-text strong {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.voice-engine-tab-text span {
+    font-size: 11px;
+    opacity: 0.65;
+}
+
+.voice-section {
+    padding: 14px 20px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.voice-section-desc {
+    font-size: 12px;
+    opacity: 0.65;
+    margin: 0;
+}
+
+.voice-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 340px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.voice-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid var(--node-border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.voice-card:hover {
+    border-color: var(--accent);
+}
+
+.voice-card.selected {
+    border-color: #7c4dff;
+    box-shadow: 0 0 0 1px #7c4dff;
+}
+
+.voice-card.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.voice-card-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.voice-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.voice-card-name {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.voice-active-badge {
+    background: #4caf50;
+    color: #fff;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.voice-card-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.voice-tag {
+    background: var(--badge-bg);
+    color: var(--badge-fg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+}
+
+.voice-desc {
+    font-size: 11px;
+    opacity: 0.65;
+}
+
+.voice-test-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--node-border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    flex-shrink: 0;
+}
+
+.voice-test-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+}
+
+.voice-test-btn.testing {
+    background: rgba(124, 77, 255, 0.15);
+    border-color: #7c4dff;
+}
+
+.voice-test-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.voice-empty {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 24px;
+    justify-content: center;
+    opacity: 0.6;
+    font-size: 12px;
+}
+
+.kokoro-activate-card {
+    border: 1px solid var(--node-border);
+    border-radius: 10px;
+    padding: 18px;
+    background: linear-gradient(135deg, rgba(124, 77, 255, 0.08), rgba(26, 35, 126, 0.05));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.kokoro-activate-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+}
+
+.kokoro-activate-header h3 {
+    font-size: 15px;
+    margin: 0 0 4px;
+}
+
+.kokoro-activate-header p {
+    font-size: 12.5px;
+    opacity: 0.78;
+    margin: 0;
+    line-height: 1.5;
+}
+
+.kokoro-bullets {
+    margin: 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    opacity: 0.8;
+}
+
+.kokoro-bullets li::marker {
+    color: #7c4dff;
+}
+
+.kokoro-activate-btn {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.kokoro-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.kokoro-progress-bar {
+    height: 6px;
+    background: var(--input-bg);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.kokoro-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #7c4dff, #4a148c);
+    transition: width 0.25s ease-out;
+}
+
+.kokoro-progress-text {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    opacity: 0.8;
+}
+
+.kokoro-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(244, 67, 54, 0.12);
+    color: #e57373;
+    border-radius: 6px;
+    font-size: 12px;
+}
+
 /* ===== Chat Panel ===== */
 .chat-fab {
     position: fixed;

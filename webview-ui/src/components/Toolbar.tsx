@@ -11,6 +11,7 @@ interface ToolbarProps {
     showMiniMap: boolean;
     onToggleMiniMap: () => void;
     onOpenModelSelector: () => void;
+    onOpenVoiceSelector: () => void;
     hasSystemArch: boolean;
     isGeneratingArch: boolean;
     onGenerateSystemArch: () => void;
@@ -25,6 +26,7 @@ export function Toolbar({
     showMiniMap,
     onToggleMiniMap,
     onOpenModelSelector,
+    onOpenVoiceSelector,
     hasSystemArch,
     isGeneratingArch,
     onGenerateSystemArch,
@@ -74,6 +76,13 @@ export function Toolbar({
                     title="AI Model Settings"
                 >
                     <Icon name="modelSettings" fixedWidth /> Model
+                </button>
+                <button
+                    className="toolbar-btn"
+                    onClick={onOpenVoiceSelector}
+                    title="Voice & Speech Settings"
+                >
+                    <Icon name="voiceSettings" fixedWidth /> Voice
                 </button>
             </div>
             <div className="toolbar-group">

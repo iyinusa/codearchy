@@ -72,6 +72,7 @@ import {
     faForwardStep,       // Next narrator step
     faBackwardStep,      // Previous narrator step
     faBookOpenReader,    // Narrator section header icon
+    faHeadphones,        // Voice / TTS settings
 } from '@fortawesome/free-solid-svg-icons';
 
 // ---------------------------------------------------------------------------
@@ -86,6 +87,7 @@ export const AppIcons: Record<string, IconDefinition> = {
     // ---- Toolbar actions ----
     aiAnalyze: faBrain,
     modelSettings: faGear,
+    voiceSettings: faHeadphones,
     miniMap: faMap,
     refresh: faRotate,
     exportSvg: faFileCode,
