@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ArchitectureGraph, ViewMode, SystemArchitecture, ProcessingMode } from './types';
+import { ArchitectureGraph, ViewMode, SystemArchitecture, ProcessingMode, NarratorStep, NarratorPayload } from './types';
 import { postMessage } from './vscode';
 import { ReactFlowView } from './components/ReactFlowView';
 import type { ReactFlowViewHandle } from './components/ReactFlowView';
@@ -13,12 +13,16 @@ import { Toolbar } from './components/Toolbar';
 import { ModelSelector } from './components/ModelSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
+import { useStoryPlayer } from './components/useStoryPlayer';
 import {
     setProjectId,
     getProjectId,
     upsertProject,
     loadSystemRecord,
     saveSystemArchitecture,
+    createNarrator,
+    subscribeNarrators,
+    type NarratorRecord,
 } from './db';
 
 export function App() {
@@ -37,10 +41,83 @@ export function App() {
     const [archStream, setArchStream] = useState<string>('');
     const [chatOpen, setChatOpen] = useState(false);
     const [processingMode, setProcessingMode] = useState<ProcessingMode>('moderate');
+    const [narrators, setNarrators] = useState<NarratorRecord[]>([]);
+    const [narrationViewMode, setNarrationViewMode] = useState<ViewMode | null>(null);
+    const [narratedNodeId, setNarratedNodeId] = useState<string | null>(null);
     const mainContentRef = useRef<HTMLDivElement>(null);
     const cytoscapeRef = useRef<CytoscapeViewHandle>(null);
     const reactFlowRef = useRef<ReactFlowViewHandle>(null);
     const systemViewRef = useRef<SystemViewHandle>(null);
+    const archStreamBodyRef = useRef<HTMLPreElement>(null);
+    const systemArchRef = useRef<SystemArchitecture | null>(null);
+    systemArchRef.current = systemArch;
+    const viewModeRef = useRef<ViewMode>(viewMode);
+    viewModeRef.current = viewMode;
+
+    // Scroll the arch-stream body to the bottom as new model tokens arrive.
+    useEffect(() => {
+        if (archStreamBodyRef.current) {
+            archStreamBodyRef.current.scrollTop = archStreamBodyRef.current.scrollHeight;
+        }
+    }, [archStream]);
+
+    /** Focus a narrated node, switching to the best-fit view automatically so
+     *  the target is actually visible. System view is preferred when the id
+     *  matches a subsystem; otherwise fall back to React Flow. */
+    const focusNarratedNode = useCallback((step: NarratorStep) => {
+        setNarratedNodeId(step.targetNodeId);
+        const sys = systemArchRef.current;
+        const hasSystemHit = !!sys?.nodes.some(n => n.id === step.targetNodeId);
+        const preferredMode: ViewMode = hasSystemHit ? 'system' : 'reactflow';
+        if (viewModeRef.current !== preferredMode) {
+            setViewMode(preferredMode);
+            setNarrationViewMode(preferredMode);
+            // Defer the imperative focus call until React Flow mounts in the
+            // newly-visible view — a single rAF is enough because both views
+            // render synchronously once their prop changes.
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    const ref = preferredMode === 'system' ? systemViewRef.current : reactFlowRef.current;
+                    ref?.focusNode(step.targetNodeId, step.action);
+                });
+            });
+            return;
+        }
+        const ref = preferredMode === 'system' ? systemViewRef.current : reactFlowRef.current;
+        ref?.focusNode(step.targetNodeId, step.action);
+    }, []);
+
+    const storyPlayer = useStoryPlayer(focusNarratedNode);
+
+    // Clear narrated highlight when the player stops.
+    useEffect(() => {
+        if (storyPlayer.state.status === 'idle') {
+            setNarratedNodeId(null);
+            setNarrationViewMode(null);
+        }
+    }, [storyPlayer.state.status]);
+
+    // Live-subscribe to the narrators table so new entries — whether added
+    // by the AI auto-generator, rename/delete, or any other tab — surface
+    // in the sidebar instantly with no manual refetch required.
+    const projectIdState = graph?.metadata?.projectId;
+    useEffect(() => {
+        if (!projectIdState) {
+            setNarrators([]);
+            return;
+        }
+        const unsubscribe = subscribeNarrators(
+            projectIdState,
+            (list) => setNarrators(list),
+        );
+        return unsubscribe;
+    }, [projectIdState]);
+
+    // Kept as a no-op stable reference so existing Sidebar prop wiring
+    // remains unchanged. The live subscription above now handles refresh.
+    const refreshNarrators = useCallback(() => {
+        /* no-op — liveQuery keeps state in sync automatically */
+    }, []);
 
     useEffect(() => {
         const handler = (event: MessageEvent) => {
@@ -84,7 +161,14 @@ export function App() {
                                     // Only hydrate if the current session has
                                     // no system arch yet — don't clobber a
                                     // freshly generated architecture.
-                                    setSystemArch(prev => prev ?? cached.architecture);
+                                    setSystemArch(prev => {
+                                        if (prev) return prev;
+                                        // Sync to extension host so the chat
+                                        // system prompt has the subsystem data
+                                        // even after a webview reload.
+                                        postMessage('syncSystemArch', { architecture: cached.architecture });
+                                        return cached.architecture;
+                                    });
                                 }
                             } catch (e) {
                                 console.error('[CodeArchy] failed to hydrate project', e);
@@ -147,6 +231,30 @@ export function App() {
                     console.error('CodeArchy error:', err.message);
                     break;
                 }
+                case 'narratorGenerated': {
+                    const payload = message.payload as NarratorPayload;
+                    if (!payload || !Array.isArray(payload.steps) || payload.steps.length === 0) {
+                        break;
+                    }
+                    const pid = getProjectId();
+                    if (!pid) break;
+                    // Persist only — the live Dexie subscription above will
+                    // push the new record into `narrators` state instantly.
+                    (async () => {
+                        try {
+                            await createNarrator(pid, {
+                                title: payload.title,
+                                question: payload.question,
+                                steps: payload.steps,
+                                preferredView: payload.preferredView,
+                                messageTimestamp: payload.messageTimestamp,
+                            });
+                        } catch (e) {
+                            console.error('[CodeArchy] save narrator failed', e);
+                        }
+                    })();
+                    break;
+                }
             }
         };
         window.addEventListener('message', handler);
@@ -206,8 +314,13 @@ export function App() {
     }, [viewMode]);
 
     const handleNodeSelect = useCallback((nodeId: string | null) => {
+        // Interactive narration: clicking a node while a narrator is playing
+        // pauses the timeline so the user can explore freely.
+        if (nodeId && storyPlayer.state.status === 'playing') {
+            storyPlayer.pause();
+        }
         setSelectedNodeId(nodeId);
-    }, []);
+    }, [storyPlayer]);
 
     const handleSubsystemHighlight = useCallback((subsystemId: string | null) => {
         setHighlightedSubsystem(subsystemId);
@@ -239,6 +352,19 @@ export function App() {
 
     const selectedNode = graph?.nodes.find(n => n.id === selectedNodeId) ?? null;
 
+    const handleNarratorPlay = useCallback((narrator: NarratorRecord) => {
+        if (!narrator.id || !narrator.steps?.length) return;
+        storyPlayer.play(narrator.id, narrator.steps);
+    }, [storyPlayer]);
+
+    const handleNarratorStop = useCallback(() => {
+        storyPlayer.stop();
+    }, [storyPlayer]);
+
+    const handleNarratorsChanged = useCallback(() => {
+        void refreshNarrators();
+    }, [refreshNarrators]);
+
     return (
         <div className="app">
             <Sidebar
@@ -249,6 +375,18 @@ export function App() {
                 onSubsystemHighlight={handleSubsystemHighlight}
                 processingMode={processingMode}
                 onProcessingModeChange={handleProcessingModeChange}
+                narrators={narrators}
+                activeNarratorId={storyPlayer.state.narratorId}
+                narratorStatus={storyPlayer.state.status}
+                narratorStepIndex={storyPlayer.state.stepIndex}
+                onNarratorPlay={handleNarratorPlay}
+                onNarratorPause={storyPlayer.pause}
+                onNarratorResume={storyPlayer.resume}
+                onNarratorStop={handleNarratorStop}
+                onNarratorNext={storyPlayer.next}
+                onNarratorPrev={storyPlayer.prev}
+                onNarratorGoto={storyPlayer.gotoStep}
+                onNarratorsChanged={handleNarratorsChanged}
             />
             <div className="main-content" ref={mainContentRef}>
                 <Toolbar
@@ -271,18 +409,20 @@ export function App() {
                     </div>
                 ) : viewMode === 'system' ? (
                     systemArch ? (
-                        <SystemView ref={systemViewRef} architecture={systemArch} showMiniMap={showMiniMap} />
+                        <SystemView ref={systemViewRef} architecture={systemArch} showMiniMap={showMiniMap} narratedNodeId={narratedNodeId} />
                     ) : isGeneratingArch ? (
                         <div className="loading">
-                            <div className="spinner" />
-                            <div className="loading-text">
-                                <strong>Generating System Architecture</strong>
-                                <span className="loading-sub">{archProgress}</span>
+                            <div className="loading-arch-top">
+                                <div className="spinner" />
+                                <div className="loading-text">
+                                    <strong>Generating System Architecture</strong>
+                                    <span className="loading-sub">{archProgress}</span>
+                                </div>
                             </div>
                             {archStream && (
                                 <div className="arch-stream" aria-live="polite">
                                     <div className="arch-stream-header">Live model output</div>
-                                    <pre className="arch-stream-body">{archStream}</pre>
+                                    <pre ref={archStreamBodyRef} className="arch-stream-body">{archStream}</pre>
                                 </div>
                             )}
                         </div>
@@ -310,6 +450,7 @@ export function App() {
                         onNodeSelect={handleNodeSelect}
                         onNavigateToFile={handleNavigateToFile}
                         showMiniMap={showMiniMap}
+                        narratedNodeId={narratedNodeId}
                     />
                 ) : (
                     <CytoscapeView

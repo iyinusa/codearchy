@@ -42,6 +42,9 @@ import {
 export interface ReactFlowViewHandle {
     exportSVG(): string | null;
     exportPNG(): Promise<string | null>;
+    /** Smoothly pan + zoom to a node and (optionally) pulse-highlight it so
+     *  the Narrator feature can drive an animated walkthrough. */
+    focusNode(nodeId: string, action?: 'focus' | 'highlight' | 'zoom'): boolean;
 }
 
 interface ReactFlowViewProps {
@@ -52,6 +55,8 @@ interface ReactFlowViewProps {
     onNodeSelect: (nodeId: string | null) => void;
     onNavigateToFile: (filePath: string, line?: number) => void;
     showMiniMap: boolean;
+    /** When set, apply the narrator-active pulse to this node id. */
+    narratedNodeId?: string | null;
 }
 
 // Custom node component for architecture modules
@@ -63,11 +68,12 @@ function ModuleNode({ data, selected }: NodeProps) {
         symbolCount: number;
         subsystemColor: string;
         dimmed: boolean;
+        narrated?: boolean;
     };
 
     return (
         <div
-            className={`module-node ${selected ? 'selected' : ''} ${nodeData.dimmed ? 'dimmed' : ''}`}
+            className={`module-node ${selected ? 'selected' : ''} ${nodeData.dimmed ? 'dimmed' : ''} ${nodeData.narrated ? 'narrator-active' : ''}`}
             style={{ borderLeftColor: nodeData.subsystemColor || 'var(--node-border)' }}
         >
             <Handle type="target" position={Position.Top} className="handle" />
@@ -118,6 +124,7 @@ function ReactFlowViewInner({
     onNodeSelect,
     onNavigateToFile,
     showMiniMap,
+    narratedNodeId,
     forwardedRef,
 }: ReactFlowViewProps & { forwardedRef?: React.Ref<ReactFlowViewHandle> }) {
     // Build raw (unpositioned) elements from the graph structure only.
@@ -131,7 +138,7 @@ function ReactFlowViewInner({
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [isLayouting, setIsLayouting] = useState(false);
-    const { fitView } = useReactFlow();
+    const { fitView, setCenter } = useReactFlow();
     const projectId = useProjectId();
 
     // Auto-layout trigger: runs whenever the graph structure changes.
@@ -235,13 +242,18 @@ function ReactFlowViewInner({
                     selectedNodeId
                 );
                 const isSelected = n.id === selectedNodeId;
-                if ((n.data as any).dimmed === dimmed && n.selected === isSelected) {
+                const narrated = !!narratedNodeId && n.id === narratedNodeId;
+                if (
+                    (n.data as any).dimmed === dimmed &&
+                    n.selected === isSelected &&
+                    (n.data as any).narrated === narrated
+                ) {
                     return n;
                 }
                 return {
                     ...n,
                     selected: isSelected,
-                    data: { ...n.data, dimmed },
+                    data: { ...n.data, dimmed, narrated },
                 };
             })
         );
@@ -285,7 +297,7 @@ function ReactFlowViewInner({
                 };
             })
         );
-    }, [graph, selectedNodeId, highlightedSubsystem, searchTerm, setNodes, setEdges]);
+    }, [graph, selectedNodeId, highlightedSubsystem, searchTerm, setNodes, setEdges, narratedNodeId]);
 
     const onNodeClick = useCallback(
         (_event: React.MouseEvent, node: Node) => {
@@ -388,8 +400,19 @@ function ReactFlowViewInner({
                     svgToPngBase64(svg, base64 => resolve(base64));
                 });
             },
+            focusNode(nodeId: string, action: 'focus' | 'highlight' | 'zoom' = 'focus'): boolean {
+                const node = nodesRef.current.find(n => n.id === nodeId);
+                if (!node) return false;
+                const width = (node as { width?: number }).width ?? 200;
+                const height = (node as { height?: number }).height ?? 80;
+                const cx = node.position.x + width / 2;
+                const cy = node.position.y + height / 2;
+                const zoom = action === 'zoom' ? 1.5 : action === 'highlight' ? 1.1 : 1.25;
+                setCenter(cx, cy, { zoom, duration: 700 });
+                return true;
+            },
         }),
-        []
+        [setCenter]
     );
 
     return (

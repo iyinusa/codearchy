@@ -11,6 +11,7 @@ export class ArchitecturePanel {
   private readonly extensionUri: vscode.Uri;
   private disposables: vscode.Disposable[] = [];
   private currentGraph: ArchitectureGraph | undefined;
+  private currentSystemArch: SystemArchitecture | undefined;
   private ollamaService: OllamaService;
   private selectedModel: string | null = null;
   private processingMode: ProcessingMode = 'moderate';
@@ -189,6 +190,18 @@ export class ArchitecturePanel {
         break;
       }
 
+      case WebviewMessageType.SyncSystemArch: {
+        // The webview loaded a cached system architecture from IndexedDB and
+        // is pushing it here so subsequent chat messages have subsystem data
+        // even without re-running AI generation.
+        const payload = message.payload as { architecture: SystemArchitecture };
+        if (payload?.architecture) {
+          this.currentSystemArch = payload.architecture;
+          this.ollamaService.setSystemArchitecture(payload.architecture);
+        }
+        break;
+      }
+
       case WebviewMessageType.StartVoiceRecording:
         this.handleStartVoiceRecording();
         break;
@@ -196,6 +209,19 @@ export class ArchitecturePanel {
       case WebviewMessageType.StopVoiceRecording:
         this.handleStopVoiceRecording();
         break;
+
+      case WebviewMessageType.GenerateNarrator: {
+        const narratorPayload = message.payload as {
+          question: string;
+          answer: string;
+          messageTimestamp?: number;
+        };
+        if (narratorPayload && narratorPayload.question && narratorPayload.answer) {
+          // Intentionally not awaited — narrator runs silently in the background.
+          this.handleGenerateNarrator(narratorPayload);
+        }
+        break;
+      }
     }
   }
 
@@ -360,6 +386,7 @@ export class ArchitecturePanel {
       });
 
       const fallbackArch = this.buildFallbackArchitecture(this.currentGraph);
+      this.currentSystemArch = fallbackArch;
       this.panel.webview.postMessage({
         type: WebviewMessageType.SystemArchData,
         payload: fallbackArch,
@@ -399,6 +426,12 @@ export class ArchitecturePanel {
         this.processingMode
       );
 
+      this.currentSystemArch = architecture;
+
+      // Keep the OllamaService chat context up to date so subsequent chat
+      // messages automatically include the freshly-generated subsystem data.
+      this.ollamaService.setSystemArchitecture(architecture);
+
       this.panel.webview.postMessage({
         type: WebviewMessageType.SystemArchData,
         payload: architecture,
@@ -410,6 +443,106 @@ export class ArchitecturePanel {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.sendError(`Architecture generation failed: ${msg}`);
+    }
+  }
+
+  // --- Narrator Handler ---
+
+  private async handleGenerateNarrator(payload: {
+    question: string;
+    answer: string;
+    messageTimestamp?: number;
+  }) {
+    // Fire-and-forget. Any failure is logged but never surfaced — narration
+    // is an enhancement layer on top of the chat response.
+    try {
+      const modelOpt = MODEL_OPTIONS.find((m) => m.id === this.selectedModel);
+      if (!modelOpt) return;
+      if (!this.currentGraph && !this.currentSystemArch) return;
+
+      // Skip the isAvailable() check here — Ollama may still be processing
+      // the preceding chat response and will report "unavailable" even though
+      // it can queue a second request just fine.  We rely on the HTTP timeout
+      // inside generate() to handle genuine outages.
+
+      // Small delay so the chat-completion response is fully drained before
+      // we issue the narration request, reducing queue contention on the model.
+      await new Promise<void>((r) => setTimeout(r, 500));
+
+      // Build the narrator node list.
+      //
+      // Priority order (most granular → highest value for step-by-step tours):
+      //   1. Individual module nodes from the Flow Diagram (reactflow) — best
+      //      for detailed walkthroughs since modules map 1-to-1 with files.
+      //   2. Subsystem group nodes from the Flow Diagram — good mid-level hops.
+      //   3. System Diagram subsystems — useful for high-level questions.
+      //
+      // The preferredView defaults to 'reactflow' so the narrator walks
+      // through the Flow Diagram by default. App.tsx will switch to the
+      // System view if the narrator picks a system-arch node id.
+
+      const FLOW_NODE_CAP = 55;
+      const SYS_NODE_CAP = 10;
+
+      const nodes: Array<{ id: string; label: string; description?: string }> = [];
+
+      // 1. Module-level nodes (Flow Diagram) — primary source
+      if (this.currentGraph) {
+        for (const n of this.currentGraph.nodes.slice(0, FLOW_NODE_CAP)) {
+          nodes.push({
+            id: n.id,
+            label: n.label,
+            description: (n.metadata?.language as string) || undefined,
+          });
+        }
+      }
+
+      // 2. Subsystem groupings from the Flow graph (if not already covered)
+      if (this.currentGraph && nodes.length < FLOW_NODE_CAP) {
+        for (const s of this.currentGraph.subsystems) {
+          if (!nodes.some(n => n.id === s.id)) {
+            nodes.push({ id: s.id, label: s.name, description: s.description });
+          }
+        }
+      }
+
+      // 3. System Diagram nodes (supplement, capped — lower priority)
+      if (this.currentSystemArch?.nodes.length) {
+        let added = 0;
+        for (const n of this.currentSystemArch.nodes) {
+          if (added >= SYS_NODE_CAP) break;
+          if (!nodes.some(existing => existing.id === n.id)) {
+            nodes.push({ id: n.id, label: n.label, description: n.description });
+            added++;
+          }
+        }
+      }
+
+      if (nodes.length === 0) return;
+
+      // Default view: Flow Diagram. App.tsx switches to System view automatically
+      // if the narrator picks a system-arch node id.
+      const preferredView: 'system' | 'reactflow' = 'reactflow';
+      const result = await this.ollamaService.generateNarration(
+        { question: payload.question, answer: payload.answer, nodes, preferredView },
+        modelOpt.ollamaTag,
+        this.processingMode,
+      );
+
+      if (!result.steps.length) return;
+
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.NarratorGenerated,
+        payload: {
+          title: result.title,
+          question: payload.question,
+          steps: result.steps,
+          preferredView,
+          messageTimestamp: payload.messageTimestamp,
+        },
+      });
+    } catch (err) {
+      console.warn('[CodeArchy] narrator generation failed', err);
     }
   }
 
@@ -493,8 +626,9 @@ export class ArchitecturePanel {
         return;
       }
 
-      // Set architecture context for chat
+      // Set architecture context for chat (both graph + system arch)
       this.ollamaService.setArchitectureContext(this.currentGraph, this.processingMode);
+      this.ollamaService.setSystemArchitecture(this.currentSystemArch);
 
       const response = await this.ollamaService.chat(
         content,

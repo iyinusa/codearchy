@@ -137,11 +137,21 @@ export enum WebviewMessageType {
     /** Webview → host: replace the host-side conversation history so the LLM
      *  context window matches the persisted DexieJS store after a delete. */
     SyncChatHistory = 'syncChatHistory',
+    /** Webview → host: push a cached system architecture (loaded from IndexedDB)
+     *  to the extension host so the chat context is correct even after a
+     *  webview reload — without needing to re-run AI generation. */
+    SyncSystemArch = 'syncSystemArch',
     // Voice input (extension-host capture)
     StartVoiceRecording = 'startVoiceRecording',
     StopVoiceRecording = 'stopVoiceRecording',
     VoiceRecordingState = 'voiceRecordingState',
     VoiceTranscript = 'voiceTranscript',
+    // Narrator (story-player timeline generation)
+    /** Webview → host: silently produce a narrator timeline for the given
+     *  assistant response. The host streams back a NarratorGenerated payload
+     *  when ready — never blocking the chat UI. */
+    GenerateNarrator = 'generateNarrator',
+    NarratorGenerated = 'narratorGenerated',
 }
 
 export interface AnalysisProgress {

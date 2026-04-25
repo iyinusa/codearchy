@@ -149,9 +149,63 @@ export function getProcessingProfile(mode: ProcessingMode): Readonly<ProcessingP
 
 const OLLAMA_BASE = 'http://localhost:11434';
 
+// Strip LaTeX math/text notation from strings so they read as plain English.
+// Applied in two stages: named arrows + wrappers first, then $...$-delimited symbols.
+function sanitizeLatexCommands(text: string): string {
+    let out = text;
+
+    // Stage 1: named arrows with labels (handle before \text{} unwrapping so
+    //   \xrightarrow{\text{label}} → \xrightarrow{label} → →[label])
+    out = out.replace(/\\xrightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `→[${l.trim()}]` : '→');
+    out = out.replace(/\\xleftarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `←[${l.trim()}]` : '←');
+    out = out.replace(/\\xRightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `⇒[${l.trim()}]` : '⇒');
+    out = out.replace(/\\xLeftarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `⇐[${l.trim()}]` : '⇐');
+    out = out.replace(/\\xleftrightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `↔[${l.trim()}]` : '↔');
+
+    // Stage 2: unwrap \text{…} and common math/text wrappers
+    out = out.replace(/\\text\{([^{}]*)\}/g, '$1');
+    out = out.replace(/\\(?:mathbf|mathit|mathcal|mathrm|mathsf|mathtt|boldsymbol|textbf|textit|texttt|textrm|emph)\{([^{}]*)\}/g, '$1');
+
+    // Stage 3: $…$ symbol shorthands
+    out = out.replace(/\$\\rightarrow\$/g, '→');
+    out = out.replace(/\$\\leftarrow\$/g, '←');
+    out = out.replace(/\$\\Rightarrow\$/g, '⇒');
+    out = out.replace(/\$\\Leftarrow\$/g, '⇐');
+    out = out.replace(/\$\\leftrightarrow\$/g, '↔');
+    out = out.replace(/\$\\to\$/g, '→');
+    out = out.replace(/\$\\gets\$/g, '←');
+    out = out.replace(/\$\\geq\$/g, '≥');
+    out = out.replace(/\$\\leq\$/g, '≤');
+    out = out.replace(/\$\\neq\$/g, '≠');
+    out = out.replace(/\$\\approx\$/g, '≈');
+    out = out.replace(/\$\\times\$/g, '×');
+    out = out.replace(/\$\\cdot\$/g, '·');
+    out = out.replace(/\$\\infty\$/g, '∞');
+    // Strip remaining $$…$$ or $…$ fences, keeping inner text
+    out = out.replace(/\$\$([^$]+)\$\$/g, '$1');
+    out = out.replace(/\$([^$\n]+)\$/g, '$1');
+
+    // Stage 4: catch-all — any remaining \command{content} → content
+    out = out.replace(/\\[a-zA-Z]+\{([^{}]*)\}/g, '$1');
+    // Lone \command (no braces) — remove
+    out = out.replace(/\\[a-zA-Z]+\b/g, '');
+
+    return out;
+}
+
+function sanitizeNarration(text: string): string {
+    return sanitizeLatexCommands(text);
+}
+
 export class OllamaService {
     private conversationHistory: ChatMessage[] = [];
     private architectureContext: string = '';
+    private systemArchitecture: SystemArchitecture | undefined;
 
     /** Check if Ollama is running */
     async isAvailable(): Promise<boolean> {
@@ -235,6 +289,117 @@ export class OllamaService {
         });
 
         return response;
+    }
+
+    /** Produce a narrator timeline from an assistant response, grounded in the
+     *  available node ids. Runs silently — the Webview renders the result as
+     *  an animated Story Player. Respects the user-selected processing mode
+     *  but clamps token budgets so it never blocks the chat UI. */
+    async generateNarration(
+        input: {
+            question: string;
+            answer: string;
+            nodes: Array<{ id: string; label: string; description?: string }>;
+            preferredView: 'system' | 'reactflow';
+        },
+        modelTag: string,
+        mode: ProcessingMode = 'fast',
+    ): Promise<{
+        title: string;
+        steps: Array<{ targetNodeId: string; narration: string; action: 'focus' | 'highlight' | 'zoom' }>;
+    }> {
+        // Derive from the user's chosen profile but clamp heavy parameters so
+        // narration never dominates the model's time budget. thinking tokens are
+        // never needed here — we want fast, stable JSON output.
+        const base = getProcessingProfile(mode);
+        const profile: ProcessingProfile = {
+            ...base,
+            numPredict: Math.min(base.numPredict, 700),
+            numCtx: Math.min(base.numCtx, 4096),
+            think: false,
+            temperature: Math.min(base.temperature + 0.05, 0.2),
+        };
+        const MAX_NODES = 60;
+        const nodeList = input.nodes.slice(0, MAX_NODES);
+        const nodeLines = nodeList
+            .map(n => `- ${n.id} :: ${n.label}${n.description ? ' — ' + n.description.slice(0, 140) : ''}`)
+            .join('\n');
+
+        const prompt =
+            `You are an architecture narrator. Convert the assistant's answer into a short visual walkthrough.\n` +
+            `\nUser question:\n${input.question.slice(0, 600)}\n` +
+            `\nAssistant answer:\n${input.answer.slice(0, 2000)}\n` +
+            `\nAvailable nodes (id :: label):\n${nodeLines}\n` +
+            `\nReturn ONLY a valid JSON object — no prose, no markdown fences, no explanation:\n` +
+            `{"title":"<short 3-6 word title>","steps":[{"targetNodeId":"<id from list>","narration":"<one plain-text sentence, no LaTeX>","action":"focus"}]}\n` +
+            `Rules:\n` +
+            `- 2 to 10 steps.\n` +
+            `- Every targetNodeId must exactly match an id from the list above.\n` +
+            `- action must be one of: focus, highlight, zoom.\n` +
+            `- narration must be plain English, <= 180 chars, no special symbols.\n` +
+            `- Output the JSON object only. No text before or after it.`;
+
+        const validIds = new Set(nodeList.map(n => n.id));
+
+        // Retry once on empty/invalid parse — the model occasionally emits a
+        // preamble on the first attempt that breaks JSON extraction.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const raw = await this.generate(modelTag, prompt, profile, undefined, { format: 'json' });
+            const result = this.parseNarrationResponse(raw, validIds);
+            if (result.steps.length > 0) return result;
+            if (attempt === 0) {
+                // Brief pause so the model runtime settles before the retry.
+                await new Promise<void>(r => setTimeout(r, 300));
+            }
+        }
+        return { title: 'Architecture walkthrough', steps: [] };
+    }
+
+    private parseNarrationResponse(
+        raw: string,
+        validIds: Set<string>,
+    ): {
+        title: string;
+        steps: Array<{ targetNodeId: string; narration: string; action: 'focus' | 'highlight' | 'zoom' }>;
+    } {
+        // The model sometimes wraps JSON in ```json fences or adds stray prose.
+        // Extract the outermost {...} block defensively.
+        let text = raw.trim();
+        const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+        if (fence) text = fence[1].trim();
+        const firstBrace = text.indexOf('{');
+        const lastBrace = text.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            text = text.slice(firstBrace, lastBrace + 1);
+        }
+
+        let parsed: { title?: string; steps?: unknown };
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            return { title: 'Architecture walkthrough', steps: [] };
+        }
+
+        const title = typeof parsed.title === 'string' && parsed.title.trim()
+            ? parsed.title.trim().slice(0, 80)
+            : 'Architecture walkthrough';
+
+        const stepsRaw = Array.isArray(parsed.steps) ? parsed.steps : [];
+        const steps: Array<{ targetNodeId: string; narration: string; action: 'focus' | 'highlight' | 'zoom' }> = [];
+        for (const s of stepsRaw) {
+            if (!s || typeof s !== 'object') continue;
+            const step = s as Record<string, unknown>;
+            const targetNodeId = typeof step.targetNodeId === 'string' ? step.targetNodeId : '';
+            const narration = typeof step.narration === 'string' ? step.narration.trim() : '';
+            const actionRaw = typeof step.action === 'string' ? step.action : 'focus';
+            const action: 'focus' | 'highlight' | 'zoom' =
+                actionRaw === 'highlight' || actionRaw === 'zoom' ? actionRaw : 'focus';
+            if (!targetNodeId || !narration) continue;
+            if (!validIds.has(targetNodeId)) continue; // drop hallucinated ids
+            steps.push({ targetNodeId, narration: sanitizeNarration(narration).slice(0, 240), action });
+            if (steps.length >= 7) break;
+        }
+        return { title, steps };
     }
 
     /** Transcribe user-recorded audio using local Ollama + Gemma. */
@@ -322,6 +487,13 @@ export class OllamaService {
         this.architectureContext = this.summarizeGraph(graph, getProcessingProfile(mode));
     }
 
+    /** Store (or clear) the AI-generated system architecture so the chat
+     *  system prompt can reference named subsystems and answer diagram-
+     *  specific questions intelligently. */
+    setSystemArchitecture(arch: SystemArchitecture | undefined): void {
+        this.systemArchitecture = arch;
+    }
+
     /** Clear conversation history */
     clearConversation(): void {
         this.conversationHistory = [];
@@ -384,17 +556,60 @@ Respond ONLY with valid JSON in this exact format:
     }
 
     private buildChatSystemPrompt(): string {
-        return `You are CodeArchy, an AI architecture assistant. You help developers understand their codebase architecture.
+        const sysSection = this.buildSystemArchSection();
 
-You have access to the following codebase architecture:
+        return `You are CodeArchy, an AI architecture assistant. \
+You help developers understand their codebase by referencing the codebase structure and live diagram data shown in the UI.
+
+THREE DIAGRAM VIEWS ARE AVAILABLE IN THE UI:
+- Flow Diagram  : Module-level dependency graph. Shows every file/module, imports, exports \
+and detected symbols. This is the most granular view.
+- System Diagram: AI-generated high-level architecture. Named subsystems (e.g. "Auth Layer", \
+"Data Access"), their responsibilities and inter-subsystem dependencies. \
+${this.systemArchitecture ? 'Data is included below.' : 'Not yet generated for this project.'}
+- Dense Diagram : Full dependency graph — same data as Flow \
+but with all edges visible simultaneously.
+
+When a user references any of these diagrams by name (e.g. "From the Flow Diagram…", \
+"in the System view", "on the Dense graph"), answer using the matching data provided \
+below. You cannot see the visual canvas itself, but you have the complete underlying data.
+${sysSection}
+FLOW DIAGRAM DATA (module-level graph):
 ${this.architectureContext}
 
 GUIDELINES:
 - Answer questions about the architecture, subsystems, dependencies, and design patterns.
 - Explain complex relationships in simple terms.
-- When asked about specific modules, reference their role in the overall architecture.
+- When asked about specific modules or diagrams, reference their role in the overall architecture.
 - Be concise but thorough. Use bullet points for lists.
-- If asked about code specifics you don't have, say so honestly.`;
+- Never say you lack access to a diagram — you have its full data above.`;
+    }
+
+    private buildSystemArchSection(): string {
+        const arch = this.systemArchitecture;
+        if (!arch || !arch.nodes.length) return '';
+
+        const lines: string[] = [
+            '',
+            'SYSTEM DIAGRAM DATA (AI-generated high-level architecture):',
+            `Pattern: ${arch.pattern}`,
+            `Summary: ${arch.summary}`,
+            'Subsystems:',
+        ];
+        for (const n of arch.nodes) {
+            lines.push(`  - ${n.id} [${n.type}]: ${n.label} — ${n.description}`);
+        }
+        if (arch.edges.length) {
+            lines.push('Dependencies:');
+            for (const e of arch.edges.slice(0, 30)) {
+                lines.push(`  - ${e.source} → ${e.target}${e.label ? ` (${e.label})` : ''}`);
+            }
+            if (arch.edges.length > 30) {
+                lines.push(`  ... and ${arch.edges.length - 30} more`);
+            }
+        }
+        lines.push('');
+        return lines.join('\n');
     }
 
     private summarizeGraph(graph: ArchitectureGraph, profile: ProcessingProfile): string {
@@ -462,7 +677,8 @@ GUIDELINES:
         model: string,
         prompt: string,
         profile: ProcessingProfile,
-        onChunk?: (text: string) => void
+        onChunk?: (text: string) => void,
+        extraBodyFields?: Record<string, unknown>
     ): Promise<string> {
         return new Promise((resolve, reject) => {
             const body = JSON.stringify({
@@ -477,6 +693,7 @@ GUIDELINES:
                     top_k: profile.topK,
                     top_p: profile.topP,
                 },
+                ...extraBodyFields,
             });
 
             const url = new URL(`${OLLAMA_BASE}/api/generate`);

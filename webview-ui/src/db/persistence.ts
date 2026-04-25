@@ -6,7 +6,10 @@ import {
     CytoscapeRecord,
     SystemRecord,
     ConversationMessageRecord,
+    NarratorRecord,
+    NarratorStepRecord,
 } from './database';
+import { liveQuery, type Subscription } from 'dexie';
 import type { ArchitectureGraph, SystemArchitecture } from '../types';
 
 /** Cheap structural fingerprint — covers node/edge identity changes but
@@ -243,4 +246,71 @@ export async function deleteConversationMessage(id: number): Promise<void> {
 
 export async function clearConversation(projectId: string): Promise<void> {
     await db.conversations.where('projectId').equals(projectId).delete();
+}
+
+// ------------------------------------------------------------------
+// Narrators (AI-generated story-player timelines)
+// ------------------------------------------------------------------
+
+export async function listNarrators(projectId: string): Promise<NarratorRecord[]> {
+    const all = await db.narrators.where('projectId').equals(projectId).toArray();
+    return all.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Subscribe to a live, auto-refreshing view of the narrators belonging to
+ *  the given project. The callback fires immediately with the current list
+ *  and then again on every add / update / delete touching that project —
+ *  even when the mutation happens in another tab or the extension host.
+ *  Returns an unsubscribe function. */
+export function subscribeNarrators(
+    projectId: string,
+    onChange: (list: NarratorRecord[]) => void,
+    onError?: (err: unknown) => void,
+): () => void {
+    const observable = liveQuery(async () => {
+        const all = await db.narrators.where('projectId').equals(projectId).toArray();
+        return all.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+    const sub: Subscription = observable.subscribe({
+        next: onChange,
+        error: (err) => {
+            console.error('[CodeArchy] narrator liveQuery failed', err);
+            onError?.(err);
+        },
+    });
+    return () => sub.unsubscribe();
+}
+
+export async function getNarrator(id: number): Promise<NarratorRecord | undefined> {
+    return db.narrators.get(id);
+}
+
+export async function createNarrator(
+    projectId: string,
+    data: Omit<NarratorRecord, 'id' | 'projectId' | 'createdAt' | 'updatedAt'>,
+): Promise<number> {
+    const now = Date.now();
+    const id = await db.narrators.add({
+        projectId,
+        title: data.title,
+        question: data.question,
+        steps: data.steps,
+        preferredView: data.preferredView,
+        messageTimestamp: data.messageTimestamp,
+        createdAt: now,
+        updatedAt: now,
+    });
+    return id as number;
+}
+
+export async function updateNarratorTitle(id: number, title: string): Promise<void> {
+    await db.narrators.update(id, { title, updatedAt: Date.now() });
+}
+
+export async function updateNarratorSteps(id: number, steps: NarratorStepRecord[]): Promise<void> {
+    await db.narrators.update(id, { steps, updatedAt: Date.now() });
+}
+
+export async function deleteNarrator(id: number): Promise<void> {
+    await db.narrators.delete(id);
 }

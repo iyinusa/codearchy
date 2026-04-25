@@ -116,3 +116,21 @@ export interface ChatMessage {
     /** Dexie auto-increment id once the message is persisted. */
     id?: number;
 }
+
+// Narrator types (AI-generated story-player timeline)
+export type NarratorAction = 'focus' | 'highlight' | 'zoom';
+
+export interface NarratorStep {
+    targetNodeId: string;
+    narration: string;
+    action: NarratorAction;
+    durationMs?: number;
+}
+
+export interface NarratorPayload {
+    title: string;
+    question: string;
+    steps: NarratorStep[];
+    preferredView: 'system' | 'reactflow';
+    messageTimestamp?: number;
+}

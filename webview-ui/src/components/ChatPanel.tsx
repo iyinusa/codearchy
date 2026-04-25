@@ -97,6 +97,21 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         }
     }, [messages]);
 
+    // When the chat panel opens, always scroll to the bottom so the user sees
+    // the latest messages rather than the top of the history.
+    useEffect(() => {
+        if (!isOpen) return;
+        isAtBottomRef.current = true;
+        // Defer one frame so the panel has transitioned to visible and the
+        // container's scrollHeight reflects the full content height.
+        requestAnimationFrame(() => {
+            const container = messagesContainerRef.current;
+            if (container) {
+                container.scrollTop = container.scrollHeight;
+            }
+        });
+    }, [isOpen]);
+
     const handleMessagesScroll = useCallback(() => {
         const container = messagesContainerRef.current;
         if (!container) return;
@@ -206,6 +221,29 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     if (autoSpeakOnNextReplyRef.current) {
                         autoSpeakOnNextReplyRef.current = false;
                         speakNow(response.content);
+                    }
+                    // Fire-and-forget narrator generation: ask the host to
+                    // silently produce a story-player timeline for this Q&A.
+                    // The host answers back with a `narratorGenerated` event
+                    // that App.tsx persists; failures are swallowed upstream.
+                    try {
+                        const history = messagesRef.current;
+                        let lastUser = '';
+                        let answerTs = Date.now();
+                        for (let i = history.length - 1; i >= 0; i--) {
+                            const m = history[i];
+                            if (m.role === 'assistant' && !m.isStreaming) answerTs = m.timestamp;
+                            if (m.role === 'user') { lastUser = m.content; break; }
+                        }
+                        if (lastUser && response.content) {
+                            postMessage('generateNarrator', {
+                                question: lastUser,
+                                answer: response.content,
+                                messageTimestamp: answerTs,
+                            });
+                        }
+                    } catch {
+                        /* narrator generation is best-effort */
                     }
                     break;
                 }
@@ -605,8 +643,68 @@ function ThinkingBubble({ text }: { text: string }) {
 }
 
 /** Full markdown formatter: headers, lists, tables, code blocks, bold, italic, inline code */
+// ── LaTeX / math symbol sanitizer ─────────────────────────────────────────────
+// Gemma occasionally emits LaTeX math notation — from simple $\rightarrow$ to
+// full command sequences like \xrightarrow{\text{label}}. Convert all to
+// Unicode / plain text so the chat panel renders cleanly.
+function sanitizeLatex(text: string): string {
+    let out = text;
+
+    // Stage 1: named arrows with optional label (most specific — handle first
+    //   so \xrightarrow{\text{Trigger}} → \xrightarrow{Trigger} → →[Trigger])
+    out = out.replace(/\\xrightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `→[${l.trim()}]` : '→');
+    out = out.replace(/\\xleftarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `←[${l.trim()}]` : '←');
+    out = out.replace(/\\xRightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `⇒[${l.trim()}]` : '⇒');
+    out = out.replace(/\\xLeftarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `⇐[${l.trim()}]` : '⇐');
+    out = out.replace(/\\xleftrightarrow\{([^{}]*)\}/g,
+        (_, l: string) => l.trim() ? `↔[${l.trim()}]` : '↔');
+
+    // Stage 2: unwrap \text{…} and common math/text wrappers
+    out = out.replace(/\\text\{([^{}]*)\}/g, '$1');
+    out = out.replace(/\\(?:mathbf|mathit|mathcal|mathrm|mathsf|mathtt|boldsymbol|textbf|textit|texttt|textrm|emph)\{([^{}]*)\}/g, '$1');
+
+    // Stage 3: $…$-delimited symbol shorthands
+    out = out.replace(/\$\\rightarrow\$/g, '→');
+    out = out.replace(/\$\\leftarrow\$/g, '←');
+    out = out.replace(/\$\\Rightarrow\$/g, '⇒');
+    out = out.replace(/\$\\Leftarrow\$/g, '⇐');
+    out = out.replace(/\$\\leftrightarrow\$/g, '↔');
+    out = out.replace(/\$\\Leftrightarrow\$/g, '⟺');
+    out = out.replace(/\$\\uparrow\$/g, '↑');
+    out = out.replace(/\$\\downarrow\$/g, '↓');
+    out = out.replace(/\$\\to\$/g, '→');
+    out = out.replace(/\$\\gets\$/g, '←');
+    out = out.replace(/\$\\geq\$/g, '≥');
+    out = out.replace(/\$\\leq\$/g, '≤');
+    out = out.replace(/\$\\neq\$/g, '≠');
+    out = out.replace(/\$\\approx\$/g, '≈');
+    out = out.replace(/\$\\times\$/g, '×');
+    out = out.replace(/\$\\cdot\$/g, '·');
+    out = out.replace(/\$\\infty\$/g, '∞');
+    out = out.replace(/\$\\alpha\$/g, 'α');
+    out = out.replace(/\$\\beta\$/g, 'β');
+    out = out.replace(/\$\\gamma\$/g, 'γ');
+    out = out.replace(/\$\\delta\$/g, 'δ');
+    // Strip remaining $$…$$ or $…$ fences, keeping inner text
+    out = out.replace(/\$\$([^$]+)\$\$/g, '$1');
+    out = out.replace(/\$([^$\n]+)\$/g, '$1');
+
+    // Stage 4: catch-all — any remaining \command{content} → content
+    out = out.replace(/\\[a-zA-Z]+\{([^{}]*)\}/g, '$1');
+    // Lone \command (no braces) — remove
+    out = out.replace(/\\[a-zA-Z]+\b/g, '');
+
+    return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function formatMessage(text: string): React.ReactNode {
-    const lines = text.split('\n');
+    const lines = sanitizeLatex(text).split('\n');
     const nodes: React.ReactNode[] = [];
     let i = 0;
     let k = 0;

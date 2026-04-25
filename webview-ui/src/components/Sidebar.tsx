@@ -1,5 +1,8 @@
-import React from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import type { ArchitectureGraph, ProcessingMode } from '../types';
+import type { NarratorRecord } from '../db';
+import { deleteNarrator, updateNarratorTitle } from '../db';
+import { Icon } from './Icons';
 
 interface SidebarProps {
     graph: ArchitectureGraph | null;
@@ -9,6 +12,19 @@ interface SidebarProps {
     onSubsystemHighlight: (id: string | null) => void;
     processingMode: ProcessingMode;
     onProcessingModeChange: (mode: ProcessingMode) => void;
+    /* Narrator feature */
+    narrators: NarratorRecord[];
+    activeNarratorId: number | null;
+    narratorStatus: 'idle' | 'playing' | 'paused';
+    narratorStepIndex: number;
+    onNarratorPlay: (narrator: NarratorRecord) => void;
+    onNarratorPause: () => void;
+    onNarratorResume: () => void;
+    onNarratorStop: () => void;
+    onNarratorNext: () => void;
+    onNarratorPrev: () => void;
+    onNarratorGoto: (index: number) => void;
+    onNarratorsChanged: () => void;
 }
 
 const PROCESSING_MODES: Array<{ id: ProcessingMode; label: string; hint: string }> = [
@@ -25,7 +41,75 @@ export function Sidebar({
     onSubsystemHighlight,
     processingMode,
     onProcessingModeChange,
+    narrators,
+    activeNarratorId,
+    narratorStatus,
+    narratorStepIndex,
+    onNarratorPlay,
+    onNarratorPause,
+    onNarratorResume,
+    onNarratorStop,
+    onNarratorNext,
+    onNarratorPrev,
+    onNarratorGoto,
+    onNarratorsChanged,
 }: SidebarProps) {
+    const [narratorSearch, setNarratorSearch] = useState('');
+    const [editingId, setEditingId] = useState<number | null>(null);
+    const [editingTitle, setEditingTitle] = useState('');
+    const stepsContainerRef = useRef<HTMLDivElement>(null);
+
+    // Scroll the active narrator step into view whenever it changes.
+    useEffect(() => {
+        if (!stepsContainerRef.current) return;
+        const active = stepsContainerRef.current.querySelector(
+            '.narrator-step.active'
+        ) as HTMLElement | null;
+        active?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, [narratorStepIndex, activeNarratorId]);
+
+    // Active narrator floats to the top; everything else stays in
+    // updatedAt-desc order (which is how listNarrators already returns them).
+    const filteredNarrators = useMemo(() => {
+        const q = narratorSearch.trim().toLowerCase();
+        const list = q
+            ? narrators.filter(n =>
+                n.title.toLowerCase().includes(q) ||
+                n.question.toLowerCase().includes(q))
+            : narrators;
+        if (!activeNarratorId) return list;
+        const idx = list.findIndex(n => n.id === activeNarratorId);
+        if (idx <= 0) return list;
+        const clone = list.slice();
+        const [active] = clone.splice(idx, 1);
+        clone.unshift(active);
+        return clone;
+    }, [narrators, narratorSearch, activeNarratorId]);
+
+    const commitTitle = async (id: number) => {
+        const trimmed = editingTitle.trim();
+        setEditingId(null);
+        if (!trimmed) return;
+        try {
+            await updateNarratorTitle(id, trimmed);
+            onNarratorsChanged();
+        } catch (e) {
+            console.error('[CodeArchy] rename narrator failed', e);
+        }
+    };
+
+    const handleDelete = async (rec: NarratorRecord) => {
+        if (rec.id === undefined) return;
+        // eslint-disable-next-line no-alert
+        if (!window.confirm(`Delete narration "${rec.title}"?`)) return;
+        try {
+            if (activeNarratorId === rec.id) onNarratorStop();
+            await deleteNarrator(rec.id);
+            onNarratorsChanged();
+        } catch (e) {
+            console.error('[CodeArchy] delete narrator failed', e);
+        }
+    };
     return (
         <div className="sidebar">
             <div className="sidebar-header">
@@ -90,6 +174,166 @@ export function Sidebar({
                         </div>
                     ))
                 )}
+            </div>
+
+            {/* NARRATIONS */}
+            <div className="narrator-section">
+                <div className="narrator-section-header">
+                    <Icon name="narrator" />
+                    <span>NARRATIONS / EXPLAINERS</span>
+                    <span className="narrator-section-count">{narrators.length}</span>
+                </div>
+                {narrators.length > 0 && (
+                    <div className="narrator-search-wrap">
+                        <Icon name="search" />
+                        <input
+                            type="text"
+                            className="narrator-search"
+                            placeholder="Search narrations..."
+                            value={narratorSearch}
+                            onChange={(e) => setNarratorSearch(e.target.value)}
+                        />
+                    </div>
+                )}
+                <div className="narrator-list">
+                    {narrators.length === 0 ? (
+                        <div className="narrator-empty">
+                            Ask the AI a question — a visual narration of its answer will appear here.
+                        </div>
+                    ) : filteredNarrators.length === 0 ? (
+                        <div className="narrator-empty">No matches.</div>
+                    ) : (
+                        filteredNarrators.map((rec) => {
+                            const isActive = activeNarratorId === rec.id;
+                            const isPlaying = isActive && narratorStatus === 'playing';
+                            const isPaused = isActive && narratorStatus === 'paused';
+                            const isEditing = editingId === rec.id;
+                            return (
+                                <div
+                                    key={rec.id}
+                                    className={`narrator-item ${isActive ? 'active' : ''} ${isPlaying ? 'playing' : ''}`}
+                                >
+                                    <div className="narrator-item-row">
+                                        <button
+                                            className="narrator-play-btn"
+                                            title={isPlaying ? 'Pause narration' : isPaused ? 'Resume narration' : 'Play narration'}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (isPlaying) onNarratorPause();
+                                                else if (isPaused) onNarratorResume();
+                                                else onNarratorPlay(rec);
+                                            }}
+                                        >
+                                            <Icon name={isPlaying ? 'pause' : 'play'} />
+                                        </button>
+                                        <div className="narrator-item-body">
+                                            {isEditing ? (
+                                                <input
+                                                    autoFocus
+                                                    className="narrator-title-input"
+                                                    value={editingTitle}
+                                                    onChange={(e) => setEditingTitle(e.target.value)}
+                                                    onBlur={() => rec.id !== undefined && commitTitle(rec.id)}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') {
+                                                            e.preventDefault();
+                                                            (e.target as HTMLInputElement).blur();
+                                                        } else if (e.key === 'Escape') {
+                                                            setEditingId(null);
+                                                        }
+                                                    }}
+                                                />
+                                            ) : (
+                                                <div className="narrator-title" title={rec.question}>{rec.title}</div>
+                                            )}
+                                            <div className="narrator-meta">
+                                                {rec.steps.length} step{rec.steps.length === 1 ? '' : 's'}
+                                            </div>
+                                        </div>
+                                        <div className="narrator-actions">
+                                            <button
+                                                className="narrator-icon-btn"
+                                                title="Rename"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    if (rec.id === undefined) return;
+                                                    setEditingId(rec.id);
+                                                    setEditingTitle(rec.title);
+                                                }}
+                                            >
+                                                <Icon name="edit" />
+                                            </button>
+                                            <button
+                                                className="narrator-icon-btn danger"
+                                                title="Delete"
+                                                onClick={(e) => { e.stopPropagation(); handleDelete(rec); }}
+                                            >
+                                                <Icon name="trash" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {isActive && (
+                                        <div className="narrator-timeline">
+                                            <div className="narrator-transport">
+                                                <button
+                                                    className="narrator-icon-btn"
+                                                    title="Previous step"
+                                                    onClick={onNarratorPrev}
+                                                    disabled={narratorStepIndex === 0}
+                                                >
+                                                    <Icon name="prevStep" />
+                                                </button>
+                                                <button
+                                                    className="narrator-icon-btn"
+                                                    title={isPlaying ? 'Pause' : 'Resume'}
+                                                    onClick={isPlaying ? onNarratorPause : onNarratorResume}
+                                                >
+                                                    <Icon name={isPlaying ? 'pause' : 'play'} />
+                                                </button>
+                                                <button
+                                                    className="narrator-icon-btn"
+                                                    title="Next step"
+                                                    onClick={onNarratorNext}
+                                                    disabled={narratorStepIndex >= rec.steps.length - 1}
+                                                >
+                                                    <Icon name="nextStep" />
+                                                </button>
+                                                <button
+                                                    className="narrator-icon-btn"
+                                                    title="Stop narration"
+                                                    onClick={onNarratorStop}
+                                                >
+                                                    <Icon name="close" />
+                                                </button>
+                                                <div className="narrator-progress">
+                                                    <div
+                                                        className="narrator-progress-fill"
+                                                        style={{
+                                                            width: `${Math.round(((narratorStepIndex + 1) / Math.max(1, rec.steps.length)) * 100)}%`,
+                                                        }}
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="narrator-steps" ref={stepsContainerRef}>
+                                                {rec.steps.map((step, i) => (
+                                                    <button
+                                                        key={i}
+                                                        className={`narrator-step ${i === narratorStepIndex ? 'active' : ''} ${i < narratorStepIndex ? 'past' : ''}`}
+                                                        onClick={() => onNarratorGoto(i)}
+                                                        title={step.narration}
+                                                    >
+                                                        <span className="narrator-step-index">{i + 1}</span>
+                                                        <span className="narrator-step-text">{step.narration}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })
+                    )}
+                </div>
             </div>
 
             {/* STATS */}
