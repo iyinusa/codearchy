@@ -97,6 +97,21 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         }
     }, [messages]);
 
+    // When the chat panel opens, always scroll to the bottom so the user sees
+    // the latest messages rather than the top of the history.
+    useEffect(() => {
+        if (!isOpen) return;
+        isAtBottomRef.current = true;
+        // Defer one frame so the panel has transitioned to visible and the
+        // container's scrollHeight reflects the full content height.
+        requestAnimationFrame(() => {
+            const container = messagesContainerRef.current;
+            if (container) {
+                container.scrollTop = container.scrollHeight;
+            }
+        });
+    }, [isOpen]);
+
     const handleMessagesScroll = useCallback(() => {
         const container = messagesContainerRef.current;
         if (!container) return;

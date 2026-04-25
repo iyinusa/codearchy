@@ -127,7 +127,10 @@ export function useStoryPlayer(
         autoSpeakRef.current = options?.autoSpeak !== false;
         statusRef.current = 'playing';
         setState({ narratorId, stepIndex: 0, status: 'playing' });
-        runStep(0);
+        // Defer the first step by one animation frame so React has flushed the
+        // 'playing' state and the graph viewport is settled before focusNode is
+        // called — without this the first step's zoom/highlight is swallowed.
+        requestAnimationFrame(() => runStep(0));
     }, [runStep]);
 
     const resume = useCallback(() => {
