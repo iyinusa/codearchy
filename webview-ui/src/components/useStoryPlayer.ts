@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NarratorStep } from '../types';
 import { speak as ttsSpeak, stopSpeaking } from '../voice/ttsManager';
+import { getVoiceConfig } from '../voice/voiceConfig';
+import { isKokoroReady } from '../voice/kokoroTTS';
 
 /**
  * useStoryPlayer — drives a narrator timeline silently in memory.
@@ -100,7 +102,14 @@ export function useStoryPlayer(
                     advance();
                 },
             });
-            timerRef.current = window.setTimeout(advance, estMs + 1200);
+            // Safety timer — advance even if speech is disabled / unsupported.
+            // When Kokoro is active, WASM inference takes 5-15 s per paragraph,
+            // so we give a generous buffer and rely on onEnd for exact timing.
+            const kokoroActive = getVoiceConfig().engine === 'kokoro' && isKokoroReady();
+            const safetyMs = kokoroActive
+                ? Math.max(30_000, estMs * 3)  // 30 s minimum; onEnd fires sooner
+                : estMs + 1200;
+            timerRef.current = window.setTimeout(advance, safetyMs);
         } else {
             timerRef.current = window.setTimeout(advance, estMs);
         }

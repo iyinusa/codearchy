@@ -739,20 +739,34 @@ export class ArchitecturePanel {
       const iconUri = webview.asWebviewUri(
         vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
       );
+      // ORT (ONNX Runtime Web) assets are copied into webview-ui/dist/ort/
+      // by esbuild. We expose the base URI so the Kokoro worker can point
+      // `wasmPaths` at our own origin instead of the default jsdelivr CDN.
+      const ortBaseUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'ort')
+      );
+      // Pre-bundled Kokoro-82M model + voices live under webview-ui/dist/kokoro-model/.
+      // The worker installs a fetch shim that translates HF URLs to this base.
+      const kokoroModelBaseUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'kokoro-model', 'onnx-community', 'Kokoro-82M-v1.0-ONNX')
+      );
+      const kokoroWorkerUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'kokoroWorker.js')
+      );
 
       return /*html*/ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${webview.cspSource} blob:; img-src ${webview.cspSource} data: blob:; font-src data:; connect-src ${webview.cspSource} http://localhost:* http://127.0.0.1:* https://huggingface.co https://*.huggingface.co https://*.hf.co https://cdn.jsdelivr.net https://cdn-lfs.huggingface.co https://cdn-lfs-us-1.huggingface.co https://cdn-lfs-eu-1.huggingface.co; worker-src blob: ${webview.cspSource}; child-src blob:; media-src ${webview.cspSource} data: blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${webview.cspSource} blob:; img-src ${webview.cspSource} data: blob:; font-src data:; connect-src ${webview.cspSource} http://localhost:* http://127.0.0.1:*; worker-src ${webview.cspSource} blob:; child-src blob:; media-src ${webview.cspSource} data: blob:;">
   <title>CodeArchy Architecture</title>
   <link rel="stylesheet" href="${cssUri}">
   <link rel="stylesheet" href="${baseStylesUri}">
 </head>
 <body>
   <div id="root"></div>
-  <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}"; window.__CODEARCHY_VOICE_CONFIG = ${JSON.stringify(this.extensionContext.globalState.get<object>('codearchy.voiceConfig') ?? {})};</script>
+  <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}"; window.CODEARCHY_ORT_BASE_URI = "${ortBaseUri}/"; window.CODEARCHY_KOKORO_MODEL_BASE_URI = "${kokoroModelBaseUri}/"; window.CODEARCHY_KOKORO_WORKER_URI = "${kokoroWorkerUri}"; window.__CODEARCHY_VOICE_CONFIG = ${JSON.stringify(this.extensionContext.globalState.get<object>('codearchy.voiceConfig') ?? {})};</script>
   <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

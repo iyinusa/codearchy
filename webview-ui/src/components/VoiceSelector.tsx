@@ -1,9 +1,8 @@
 /**
- * VoiceSelector modal — mirrors the look & feel of `ModelSelector` but
- * lets the user pick a TTS engine + specific voice, with a "Test" button
- * for each option. Kokoro TTS is gated behind an explicit "Activate"
- * action; activation is what triggers the lazy import of the engine
- * chunk + the one-time download of the ~80 MB ONNX model weights.
+ * VoiceSelector modal — pick a TTS engine + specific voice with a "Test"
+ * preview button for each option. Kokoro TTS is pre-bundled with the
+ * extension and warmed up on app mount, so no install/activate flow is
+ * needed; voices simply become testable once the engine reports ready.
  */
 
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
@@ -22,6 +21,8 @@ import {
     stopSpeaking,
     subscribeWebSpeechVoices,
     subscribeSpeaking,
+    subscribeKokoroStatus,
+    startKokoroEngine,
 } from '../voice/ttsManager';
 
 interface VoiceSelectorProps {
@@ -30,55 +31,31 @@ interface VoiceSelectorProps {
 
 interface KokoroLoadState {
     status: 'idle' | 'loading' | 'ready' | 'error';
-    phase?: string;
-    percent?: number;
     error?: string;
 }
 
 export function VoiceSelector({ onClose }: VoiceSelectorProps) {
     const [config, setConfig] = useState<VoiceConfig>(() => getVoiceConfig());
     const [webVoices, setWebVoices] = useState<SpeechSynthesisVoice[]>([]);
-    const [kokoroState, setKokoroState] = useState<KokoroLoadState>(
-        // If previously activated, start as 'ready'; we'll lazy-reload from cache below.
-        () => ({ status: config.kokoroActivated ? 'ready' : 'idle' }),
-    );
+    const [kokoroState, setKokoroState] = useState<KokoroLoadState>({ status: 'idle' });
     const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
     const [activeEngine, setActiveEngine] = useState<VoiceEngineId>(config.engine);
 
     useEffect(() => subscribeVoiceConfig(setConfig), []);
     useEffect(() => subscribeWebSpeechVoices(setWebVoices), []);
-    useEffect(() => {
-        return subscribeSpeaking((sp) => {
-            if (!sp) setTestingVoiceId(null);
-        });
-    }, []);
+    useEffect(() => subscribeSpeaking((sp) => { if (!sp) setTestingVoiceId(null); }), []);
+    useEffect(() => subscribeKokoroStatus(({ status, error }) =>
+        setKokoroState({ status, error: error ?? undefined }),
+    ), []);
 
-    // Auto-reload engine from cache when the modal opens and Kokoro is activated.
-    // The model weights are already cached in IndexedDB so this is near-instant.
+    // Ensure the engine is warming when the user opens this modal — a no-op
+    // if App.tsx already kicked it off on mount.
     useEffect(() => {
-        if (!config.kokoroActivated) return;
-        void import('../voice/kokoroEngine').then((mod) => {
-            if (mod.isKokoroLoaded()) {
-                setKokoroState({ status: 'ready' });
-                return;
-            }
-            setKokoroState({ status: 'loading', phase: 'Loading model from cache…' });
-            mod.loadKokoro((info) => {
-                setKokoroState({ status: 'loading', phase: info.phase, percent: info.percent });
-            }).then(() => {
-                setKokoroState({ status: 'ready', percent: 100, phase: 'Ready' });
-            }).catch((err: unknown) => {
-                const msg = err instanceof Error ? err.message : String(err);
-                setKokoroState({ status: 'error', error: msg });
-            });
-        });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []); // run once on mount
+        void startKokoroEngine().catch(() => { /* surfaced via subscribeKokoroStatus */ });
+    }, []);
 
     // Stop any test speech when the modal closes.
-    useEffect(() => {
-        return () => stopSpeaking();
-    }, []);
+    useEffect(() => () => stopSpeaking(), []);
 
     const webVoiceOptions: VoiceOption[] = useMemo(
         () =>
@@ -95,16 +72,14 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
         [webVoices],
     );
 
-    const handleSelectEngine = (engine: VoiceEngineId) => {
-        setActiveEngine(engine);
-    };
+    const handleSelectEngine = (engine: VoiceEngineId) => setActiveEngine(engine);
 
     const handleSelectVoice = (option: VoiceOption) => {
-        if (option.engine === 'kokoro' && !config.kokoroActivated) return;
+        if (option.engine === 'kokoro' && kokoroState.status !== 'ready') return;
         setVoiceConfig({ engine: option.engine, voiceId: option.id });
     };
 
-    const previewText = 'Hello! This is how the selected voice sounds when reading the architecture explanation.';
+    const previewText = "Hello, I'm your voice explainer, ready to narrate your system architecture.";
 
     const handleTest = useCallback(async (option: VoiceOption) => {
         if (testingVoiceId === option.id) {
@@ -112,12 +87,9 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
             setTestingVoiceId(null);
             return;
         }
-        if (option.engine === 'kokoro' && !config.kokoroActivated) return;
+        if (option.engine === 'kokoro' && kokoroState.status !== 'ready') return;
 
         setTestingVoiceId(option.id);
-        // Temporarily swap the active config for the preview so `speak()`
-        // routes through the right engine + voice without the user having
-        // to commit their choice first.
         const prev = getVoiceConfig();
         setVoiceConfig({ engine: option.engine, voiceId: option.id });
         try {
@@ -126,44 +98,26 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 onError: () => setTestingVoiceId(null),
             });
         } finally {
-            // Restore the user's persisted choice if they hadn't already
-            // selected this voice.
             if (prev.voiceId !== option.id || prev.engine !== option.engine) {
                 setVoiceConfig({ engine: prev.engine, voiceId: prev.voiceId });
             }
         }
-    }, [testingVoiceId, config.kokoroActivated]);
+    }, [testingVoiceId, kokoroState.status]);
 
-    const handleActivateKokoro = useCallback(async () => {
-        if (kokoroState.status === 'loading') return;
-        setKokoroState({ status: 'loading', phase: 'Preparing…' });
-        try {
-            const mod = await import('../voice/kokoroEngine');
-            await mod.loadKokoro((info) => {
-                setKokoroState({
-                    status: 'loading',
-                    phase: info.phase,
-                    percent: info.percent,
-                });
-            });
-            setKokoroState({ status: 'ready', percent: 100, phase: 'Ready' });
-            setVoiceConfig({
-                engine: 'kokoro',
-                voiceId: getVoiceConfig().voiceId && KOKORO_VOICES.some((v) => v.id === getVoiceConfig().voiceId)
-                    ? getVoiceConfig().voiceId
-                    : DEFAULT_KOKORO_VOICE,
-                kokoroActivated: true,
-            });
-            setActiveEngine('kokoro');
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            setKokoroState({ status: 'error', error: msg });
+    // Auto-default the Kokoro voice once the engine becomes ready and the
+    // user is on the Kokoro tab without a Kokoro voice selected.
+    useEffect(() => {
+        if (kokoroState.status !== 'ready') return;
+        const cfg = getVoiceConfig();
+        const isKokoroVoice = cfg.engine === 'kokoro' && KOKORO_VOICES.some((v) => v.id === cfg.voiceId);
+        if (activeEngine === 'kokoro' && !isKokoroVoice) {
+            setVoiceConfig({ engine: 'kokoro', voiceId: DEFAULT_KOKORO_VOICE });
         }
-    }, [kokoroState.status]);
+    }, [kokoroState.status, activeEngine]);
 
     const renderVoiceList = (engine: VoiceEngineId) => {
         const list: VoiceOption[] = engine === 'kokoro' ? KOKORO_VOICES : webVoiceOptions;
-        const disabled = engine === 'kokoro' && !config.kokoroActivated;
+        const disabled = engine === 'kokoro' && kokoroState.status !== 'ready';
 
         if (list.length === 0) {
             return (
@@ -241,7 +195,15 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                         <Icon name="aiMagic" fixedWidth />
                         <div className="voice-engine-tab-text">
                             <strong>Kokoro TTS</strong>
-                            <span>{config.kokoroActivated ? 'Activated · Neural · Offline' : 'Neural · Offline · Requires activation'}</span>
+                            <span>
+                                {kokoroState.status === 'ready'
+                                    ? 'Neural · Offline · Pre-bundled'
+                                    : kokoroState.status === 'loading'
+                                        ? 'Initialising voice engine…'
+                                        : kokoroState.status === 'error'
+                                            ? 'Engine error — see details'
+                                            : 'Neural · Offline · Pre-bundled'}
+                            </span>
                         </div>
                     </button>
                 </div>
@@ -250,99 +212,32 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                     <div className="voice-section">
                         <p className="voice-section-desc">
                             Uses your operating system's built-in speech engine. Fast, free,
-                            and works fully offline once installed.
+                            and works fully offline.
                         </p>
                         {renderVoiceList('web-speech')}
                     </div>
                 ) : (
                     <div className="voice-section">
-                        {!config.kokoroActivated ? (
-                            <div className="kokoro-activate-card">
-                                <div className="kokoro-activate-header">
-                                    <Icon name="aiMagic" size="2x" />
-                                    <div>
-                                        <h3>Activate Kokoro TTS</h3>
-                                        <p>
-                                            Kokoro-82M is a high-quality neural text-to-speech model.
-                                            Activating it downloads the model weights (~80&nbsp;MB) once,
-                                            then runs fully offline.
-                                        </p>
-                                    </div>
+                        <p className="voice-section-desc">
+                            Kokoro-82M is pre-bundled with the extension. Pick a voice and tap
+                            <strong> Test</strong> to preview.
+                        </p>
+                        {kokoroState.status === 'loading' && (
+                            <div className="kokoro-progress">
+                                <div className="kokoro-progress-text">
+                                    <Icon name="spinner" spin /> Loading neural voice engine…
                                 </div>
-                                <ul className="kokoro-bullets">
-                                    <li>12 curated voices · American & British accents</li>
-                                    <li>Streaming WASM inference · No cloud calls after install</li>
-                                    <li>Chunk loaded on demand — zero impact until activated</li>
-                                </ul>
-                                {kokoroState.status === 'error' && (
-                                    <div className="kokoro-error">
-                                        <Icon name="warning" /> {kokoroState.error}
-                                    </div>
-                                )}
-                                {kokoroState.status === 'loading' ? (
-                                    <div className="kokoro-progress">
-                                        <div className="kokoro-progress-bar">
-                                            <div
-                                                className="kokoro-progress-fill"
-                                                style={{ width: `${kokoroState.percent ?? 5}%` }}
-                                            />
-                                        </div>
-                                        <div className="kokoro-progress-text">
-                                            <Icon name="spinner" spin /> {kokoroState.phase ?? 'Loading…'}
-                                            {typeof kokoroState.percent === 'number' && ` · ${kokoroState.percent}%`}
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <button
-                                        className="btn-retry kokoro-activate-btn"
-                                        onClick={handleActivateKokoro}
-                                    >
-                                        <Icon name="aiMagic" /> Install &amp; Activate Kokoro TTS
-                                    </button>
-                                )}
-                            </div>
-                        ) : (
-                            <>
-                                <p className="voice-section-desc">
-                                    Kokoro TTS is active. Pick a voice and tap <strong>Test</strong> to preview.
+                                <p className="kokoro-loading-hint">
+                                    Test buttons activate once the model is ready.
                                 </p>
-                                {kokoroState.status === 'loading' && (
-                                    <div className="kokoro-progress">
-                                        <div className="kokoro-progress-bar">
-                                            <div
-                                                className="kokoro-progress-fill"
-                                                style={{ width: `${kokoroState.percent ?? 5}%` }}
-                                            />
-                                        </div>
-                                        <div className="kokoro-progress-text">
-                                            <Icon name="spinner" spin /> {kokoroState.phase ?? 'Loading…'}
-                                        </div>
-                                    </div>
-                                )}
-                                {kokoroState.status === 'error' && (
-                                    <div className="kokoro-error">
-                                        <Icon name="warning" /> {kokoroState.error}
-                                    </div>
-                                )}
-                                {renderVoiceList('kokoro')}
-                                <div className="kokoro-deactivate">
-                                    <button
-                                        className="kokoro-remove-btn"
-                                        onClick={() => {
-                                            stopSpeaking();
-                                            setVoiceConfig({ engine: 'web-speech', kokoroActivated: false, voiceId: null });
-                                            setActiveEngine('web-speech');
-                                            setKokoroState({ status: 'idle' });
-                                        }}
-                                    >
-                                        <Icon name="trash" /> Remove Kokoro TTS
-                                    </button>
-                                    <span className="kokoro-remove-hint">
-                                        Clears activation. Cached model weights stay until storage is cleared.
-                                    </span>
-                                </div>
-                            </>
+                            </div>
                         )}
+                        {kokoroState.status === 'error' && (
+                            <div className="kokoro-error">
+                                <Icon name="warning" /> {kokoroState.error}
+                            </div>
+                        )}
+                        {renderVoiceList('kokoro')}
                     </div>
                 )}
             </div>

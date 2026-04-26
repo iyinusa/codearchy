@@ -15,8 +15,7 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
-import { warmupKokoro } from './voice/ttsManager';
-import { getVoiceConfig } from './voice/voiceConfig';
+import { startKokoroEngine } from './voice/ttsManager';
 import {
     setProjectId,
     getProjectId,
@@ -65,14 +64,14 @@ export function App() {
         }
     }, [archStream]);
 
-    // Pre-warm Kokoro TTS in the background if the user previously activated it.
-    // This ensures the ONNX model is loaded from cache before the first speak
-    // call, eliminating the cold-start delay when the user sends a chat message.
+    // Eagerly boot the pre-bundled Kokoro TTS worker so the model is warm
+    // by the time the user triggers their first speak() — no install,
+    // no download, no UI lag during synthesis.
     useEffect(() => {
-        if (getVoiceConfig().kokoroActivated) {
-            warmupKokoro();
-        }
-    }, []); // eslint-disable-line react-hooks/exhaustive-deps
+        void startKokoroEngine().catch((err) => {
+            console.warn('[CodeArchy] Kokoro engine failed to start:', err);
+        });
+    }, []);
 
     /** Focus a narrated node, switching to the best-fit view automatically so
      *  the target is actually visible. System view is preferred when the id
