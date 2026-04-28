@@ -62,6 +62,20 @@ let stopFlag = 0;
 // same warm twice. Worker echoes a 'warmed' ack so this stays in sync.
 const warmedVoices = new Set<string>();
 
+// ── Generate (cache-prefill) state ─────────────────────────────────────────
+//
+// Independent lane from speak(): used to pre-synthesise audio that will be
+// stored in IndexedDB and played back later as cached PCM. Each call to
+// kokoroGenerate() reserves a fresh id and resolves once the worker posts
+// a matching 'generated' event back. Errors with the same id reject.
+
+interface PendingGen {
+    resolve: (audio: KokoroAudio) => void;
+    reject: (err: unknown) => void;
+    voice: string;
+}
+const pendingGen = new Map<number, PendingGen>();
+
 // ── AudioContext ───────────────────────────────────────────────────────────
 
 function getAudioCtx(): AudioContext {
@@ -107,6 +121,7 @@ type WorkerOut =
     | { type: 'warmed'; voice: string }
     | { type: 'chunk'; id: number; pcm: Float32Array; sampleRate: number }
     | { type: 'end'; id: number }
+    | { type: 'generated'; id: number; pcm: Float32Array; sampleRate: number }
     | { type: 'error'; id?: number; message: string };
 
 function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
@@ -141,6 +156,14 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
         return;
     }
 
+    if (msg.type === 'generated') {
+        const pending = pendingGen.get(msg.id);
+        if (!pending) return;
+        pendingGen.delete(msg.id);
+        pending.resolve({ pcm: msg.pcm, sampleRate: msg.sampleRate, voiceId: pending.voice });
+        return;
+    }
+
     if (msg.type === 'end') {
         // Ignore end events for speaks that were already cancelled.
         if (msg.id !== activeId) { flushQueued(); return; }
@@ -164,6 +187,17 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
     }
 
     if (msg.type === 'error') {
+        // Reject any pending generate keyed by the same id first — the
+        // generate lane is independent from speak, so a generate-side
+        // failure must not tear down an unrelated active speak.
+        if (msg.id !== undefined) {
+            const pending = pendingGen.get(msg.id);
+            if (pending) {
+                pendingGen.delete(msg.id);
+                pending.reject(new Error(msg.message));
+                return;
+            }
+        }
         // Ignore errors for speaks that were already cancelled.
         if (msg.id !== undefined && msg.id !== activeId) { return; }
         busy = false;
@@ -348,4 +382,97 @@ export function kokoroWarm(voice: string): void {
     // next voice change.
     warmedVoices.add(voice);
     worker.postMessage({ type: 'warm', voice });
+}
+
+// ── Generate (cache-prefill) ───────────────────────────────────────────────
+
+export interface KokoroAudio {
+    pcm: Float32Array;
+    sampleRate: number;
+    /** The Kokoro voice id this audio was synthesised with. */
+    voiceId: string;
+}
+
+/**
+ * Synthesise a complete utterance in the background and return the full
+ * PCM in one go. Independent of the streaming `kokoroSpeak()` lane —
+ * intended for the persistence-cache layer that pre-builds audio so
+ * later playback is instant.
+ *
+ * Does NOT play the audio. The caller is responsible for storing it
+ * and passing it to `playKokoroPcm()` when the user wants to hear it.
+ */
+export function kokoroGenerate(text: string, voice?: string): Promise<KokoroAudio> {
+    if (!ready || !worker) return Promise.reject(new Error('Kokoro not ready'));
+    const w = worker;
+    const id = nextId++;
+    const v = voice ?? DEFAULT_KOKORO_VOICE;
+    return new Promise<KokoroAudio>((resolve, reject) => {
+        pendingGen.set(id, { resolve, reject, voice: v });
+        w.postMessage({ type: 'generate', id, text, voice: v });
+    });
+}
+
+// ── Cached PCM playback ────────────────────────────────────────────────────
+
+export interface KokoroPlayOptions {
+    onEnd?: () => void;
+    onError?: (err: unknown) => void;
+}
+
+/**
+ * Play a previously-synthesised PCM buffer through the same AudioContext
+ * + activeSources tracking that `kokoroSpeak()` uses, so a subsequent
+ * `kokoroStop()` can cancel it just the same.
+ *
+ * Resolves once playback finishes (or is interrupted via stop). Does NOT
+ * touch the worker — synthesis already happened.
+ */
+export function playKokoroPcm(
+    pcm: Float32Array,
+    sampleRate: number,
+    options: KokoroPlayOptions = {},
+): Promise<void> {
+    // Cancel any in-flight synthesis or prior cached playback so the new
+    // buffer is the only audible source. kokoroStop() also unlocks any
+    // queued speak waiting on the active id.
+    kokoroStop();
+    const ctx = getAudioCtx();
+    if (ctx.state !== 'running') {
+        ctx.resume().catch(() => { /* ignore — gesture may have lapsed */ });
+    }
+    const myStop = stopFlag;
+    return new Promise<void>((resolve) => {
+        let buffer: AudioBuffer;
+        try {
+            buffer = ctx.createBuffer(1, pcm.length, sampleRate);
+            buffer.getChannelData(0).set(pcm);
+        } catch (e) {
+            options.onError?.(e);
+            resolve();
+            return;
+        }
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        activeSources.add(source);
+        let finished = false;
+        const finish = (interrupted: boolean) => {
+            if (finished) return;
+            finished = true;
+            activeSources.delete(source);
+            try { source.disconnect(); } catch { /* ignore */ }
+            // Only fire onEnd when WE were the active playback at start —
+            // a superseded playback has already had its caller notified.
+            if (!interrupted && stopFlag === myStop) options.onEnd?.();
+            resolve();
+        };
+        source.onended = () => finish(stopFlag !== myStop);
+        try {
+            source.start();
+        } catch (e) {
+            options.onError?.(e);
+            finish(true);
+        }
+    });
 }

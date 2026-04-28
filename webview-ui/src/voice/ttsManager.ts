@@ -14,7 +14,16 @@
  */
 
 import { getVoiceConfig } from './voiceConfig';
-import { initKokoro, isKokoroReady, kokoroSpeak, kokoroStop, kokoroWarm } from './kokoroTTS';
+import {
+    initKokoro,
+    isKokoroReady,
+    kokoroSpeak,
+    kokoroStop,
+    kokoroWarm,
+    kokoroGenerate,
+    playKokoroPcm,
+    type KokoroAudio,
+} from './kokoroTTS';
 import { subscribeVoiceConfig } from './voiceConfig';
 import { DEFAULT_KOKORO_VOICE } from './kokoroVoices';
 
@@ -270,4 +279,85 @@ export async function speak(text: string, opts: SpeakOpts = {}): Promise<void> {
         } catch { /* fall through to Web Speech */ }
     }
     speakWebSpeech(clean, opts, gen);
+}
+
+// ── Cache-aware Kokoro voice helpers ────────────────────────────────────────
+//
+// These power the "fluid voice cache" architecture: the chat panel and the
+// narrator pre-synthesise audio in the background after each AI response,
+// store the PCM in IndexedDB, and replay it from cache. Because cached
+// playback is instant, we deliberately do NOT toggle the synthesizing state
+// — no "Processing voice…" overlay flashes for cached clips, which makes
+// Kokoro feel like a conventional TTS even though synthesis took seconds.
+
+/**
+ * Synthesise a complete utterance via Kokoro and return the raw PCM. Callers
+ * persist the result so subsequent playbacks bypass the model. Returns null
+ * when the input is empty after sanitisation or Kokoro isn't available.
+ */
+export async function synthesizeKokoroAudio(
+    text: string,
+    voiceId?: string,
+): Promise<KokoroAudio | null> {
+    const clean = cleanText(text);
+    if (!clean) return null;
+    if (!isKokoroReady()) {
+        try { await startKokoroEngine(); } catch { return null; }
+    }
+    const target = voiceId ?? getVoiceConfig().voiceId ?? DEFAULT_KOKORO_VOICE;
+    try {
+        return await kokoroGenerate(clean, target);
+    } catch (err) {
+        console.warn('[CodeArchy] kokoroGenerate failed:', err);
+        return null;
+    }
+}
+
+/**
+ * Play a previously-cached PCM buffer. Mirrors `speakingState` so existing
+ * speaker-icon UI stays in sync, but skips the synthesizing state because
+ * playback is instantaneous.
+ */
+export function playCachedAudio(
+    pcm: Float32Array,
+    sampleRate: number,
+    opts: SpeakOpts = {},
+): Promise<void> {
+    stopSpeaking();
+    // Bump the synth generation so any stale Web-Speech callbacks from a
+    // previous speak() can't toggle states underneath us.
+    synthGeneration++;
+    setSpeaking(true);
+    return new Promise<void>((resolve) => {
+        playKokoroPcm(pcm, sampleRate, {
+            onEnd: () => {
+                setSpeaking(false);
+                opts.onEnd?.();
+                resolve();
+            },
+            onError: (e) => {
+                setSpeaking(false);
+                opts.onError?.(e);
+                resolve();
+            },
+        }).catch((e) => {
+            setSpeaking(false);
+            opts.onError?.(e);
+            resolve();
+        });
+    });
+}
+
+/**
+ * Returns true when the Kokoro engine is the user's current pick AND the
+ * worker is ready to serve generate() calls. Convenience wrapper used by
+ * ChatPanel / useStoryPlayer to decide whether to take the cache path.
+ */
+export function isKokoroActive(): boolean {
+    return getVoiceConfig().engine === 'kokoro' && isKokoroReady();
+}
+
+/** Resolve the voice id that synthesizeKokoroAudio() will use right now. */
+export function getActiveKokoroVoiceId(): string {
+    return getVoiceConfig().voiceId ?? DEFAULT_KOKORO_VOICE;
 }

@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NarratorStep } from '../types';
-import { speak as ttsSpeak, stopSpeaking } from '../voice/ttsManager';
+import {
+    speak as ttsSpeak,
+    stopSpeaking,
+    synthesizeKokoroAudio,
+    playCachedAudio,
+    isKokoroActive,
+    getActiveKokoroVoiceId,
+} from '../voice/ttsManager';
 import { getVoiceConfig } from '../voice/voiceConfig';
 import { isKokoroReady } from '../voice/kokoroTTS';
+import { arrayBufferToPcm, updateNarratorStepVoice } from '../db';
 
 /**
  * useStoryPlayer — drives a narrator timeline silently in memory.
@@ -49,6 +57,7 @@ export function useStoryPlayer(
     const autoSpeakRef = useRef<boolean>(true);
     const timerRef = useRef<number | null>(null);
     const stepIndexRef = useRef<number>(0);
+    const narratorIdRef = useRef<number | null>(null);
     const onStepRef = useRef(onStep);
     onStepRef.current = onStep;
 
@@ -92,24 +101,97 @@ export function useStoryPlayer(
         };
 
         if (autoSpeakRef.current) {
-            // Use the unified TTS manager — respects user's engine/voice choice
-            // (Web Speech or Kokoro) rather than always using the system default.
-            void ttsSpeak(step.narration, {
-                onEnd: () => {
-                    advance();
-                },
-                onError: () => {
-                    advance();
-                },
-            });
-            // Safety timer — advance even if speech is disabled / unsupported.
-            // When Kokoro is active, WASM inference takes 5-15 s per paragraph,
-            // so we give a generous buffer and rely on onEnd for exact timing.
-            const kokoroActive = getVoiceConfig().engine === 'kokoro' && isKokoroReady();
-            const safetyMs = kokoroActive
-                ? Math.max(30_000, estMs * 3)  // 30 s minimum; onEnd fires sooner
-                : estMs + 1200;
-            timerRef.current = window.setTimeout(advance, safetyMs);
+            // Cache-first: when Kokoro is the active engine and this step
+            // already has a matching cached PCM, play it instantly. Falls
+            // back to on-demand synthesis (and persists the result) if the
+            // cache is empty or was generated for a different voice.
+            const kokoroActive = isKokoroActive();
+            const activeVoice = kokoroActive ? getActiveKokoroVoiceId() : null;
+            const cached =
+                kokoroActive &&
+                    step.voice &&
+                    step.voiceSampleRate &&
+                    step.voiceId === activeVoice
+                    ? { pcm: arrayBufferToPcm(step.voice), sampleRate: step.voiceSampleRate }
+                    : null;
+
+            if (cached) {
+                void playCachedAudio(cached.pcm, cached.sampleRate, {
+                    onEnd: () => advance(),
+                    onError: () => advance(),
+                });
+                // Cached playback is instant — keep the safety timer tight.
+                timerRef.current = window.setTimeout(advance, estMs * 4);
+            } else if (kokoroActive && activeVoice) {
+                // On-demand synth + persist + play. We capture the step
+                // index and narrator id so a slow synth can't cross-pollute
+                // a step the user has since skipped past.
+                const myIndex = index;
+                const myNarratorId = narratorIdRef.current;
+                (async () => {
+                    const audio = await synthesizeKokoroAudio(step.narration, activeVoice);
+                    if (statusRef.current !== 'playing' || stepIndexRef.current !== myIndex) {
+                        // Player moved on — drop the result; cache write
+                        // would still be nice but the user already paused
+                        // or skipped, so skip the write to avoid stomping
+                        // a fresher in-flight synth at the new index.
+                        return;
+                    }
+                    if (!audio) {
+                        // Synth failed → fall back to streaming so the
+                        // narration is still audible.
+                        void ttsSpeak(step.narration, {
+                            onEnd: () => advance(),
+                            onError: () => advance(),
+                        });
+                        return;
+                    }
+                    // Persist back to the narrator row so subsequent plays
+                    // are instant. Mutate stepsRef in place too — the
+                    // hook's local copy isn't reactive but other steps may
+                    // still reference voice on their own playback.
+                    // Cast: `TypedArray.buffer` is now typed as
+                    // `ArrayBuffer | SharedArrayBuffer`; our PCM is
+                    // always backed by a non-shared ArrayBuffer.
+                    const buffer = audio.pcm.buffer.slice(
+                        audio.pcm.byteOffset,
+                        audio.pcm.byteOffset + audio.pcm.byteLength,
+                    ) as ArrayBuffer;
+                    const liveSteps = stepsRef.current.slice();
+                    if (liveSteps[myIndex]) {
+                        liveSteps[myIndex] = {
+                            ...liveSteps[myIndex],
+                            voice: buffer,
+                            voiceId: audio.voiceId,
+                            voiceSampleRate: audio.sampleRate,
+                        };
+                        stepsRef.current = liveSteps;
+                    }
+                    if (myNarratorId !== null) {
+                        updateNarratorStepVoice(myNarratorId, myIndex, audio).catch(e =>
+                            console.error('[CodeArchy] persist step voice failed', e),
+                        );
+                    }
+                    void playCachedAudio(audio.pcm, audio.sampleRate, {
+                        onEnd: () => advance(),
+                        onError: () => advance(),
+                    });
+                })();
+                // Generous safety: synth can take seconds.
+                const safetyMs = Math.max(30_000, estMs * 3);
+                timerRef.current = window.setTimeout(advance, safetyMs);
+            } else {
+                // Web Speech engine — original streaming path, unchanged.
+                void ttsSpeak(step.narration, {
+                    onEnd: () => advance(),
+                    onError: () => advance(),
+                });
+                const kokoroLegacy = getVoiceConfig().engine === 'kokoro' && isKokoroReady();
+                const safetyMs = kokoroLegacy
+                    ? Math.max(30_000, estMs * 3)
+                    : estMs + 1200;
+                timerRef.current = window.setTimeout(advance, safetyMs);
+            }
         } else {
             timerRef.current = window.setTimeout(advance, estMs);
         }
@@ -117,6 +199,7 @@ export function useStoryPlayer(
 
     const play = useCallback((narratorId: number, steps: NarratorStep[], options?: { autoSpeak?: boolean }) => {
         stepsRef.current = steps;
+        narratorIdRef.current = narratorId;
         autoSpeakRef.current = options?.autoSpeak !== false;
         statusRef.current = 'playing';
         setState({ narratorId, stepIndex: 0, status: 'playing' });
@@ -144,6 +227,7 @@ export function useStoryPlayer(
         statusRef.current = 'idle';
         stepsRef.current = [];
         stepIndexRef.current = 0;
+        narratorIdRef.current = null;
         cancelSpeech();
         clearTimer();
         setState({ narratorId: null, stepIndex: 0, status: 'idle' });

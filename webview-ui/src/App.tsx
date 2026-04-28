@@ -15,7 +15,7 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
-import { startKokoroEngine, subscribeSynthesizing } from './voice/ttsManager';
+import { startKokoroEngine, subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId } from './voice/ttsManager';
 import {
     setProjectId,
     getProjectId,
@@ -23,6 +23,7 @@ import {
     loadSystemRecord,
     saveSystemArchitecture,
     createNarrator,
+    updateNarratorStepVoice,
     subscribeNarrators,
     type NarratorRecord,
 } from './db';
@@ -263,13 +264,38 @@ export function App() {
                     // push the new record into `narrators` state instantly.
                     (async () => {
                         try {
-                            await createNarrator(pid, {
+                            const narratorId = await createNarrator(pid, {
                                 title: payload.title,
                                 question: payload.question,
                                 steps: payload.steps,
                                 preferredView: payload.preferredView,
                                 messageTimestamp: payload.messageTimestamp,
                             });
+                            // Background voice cache: synthesise each step
+                            // with the active Kokoro voice and persist the
+                            // PCM so the narrator timeline plays back fluidly
+                            // without 5-15 s synth gaps. Sequential to avoid
+                            // saturating the worker; per-step failures are
+                            // swallowed so one bad step doesn't kill the rest.
+                            if (isKokoroActive() && payload.steps.length) {
+                                const voiceId = getActiveKokoroVoiceId();
+                                void (async () => {
+                                    for (let i = 0; i < payload.steps.length; i++) {
+                                        const step = payload.steps[i];
+                                        try {
+                                            const audio = await synthesizeKokoroAudio(
+                                                step.narration,
+                                                voiceId,
+                                            );
+                                            if (audio) {
+                                                await updateNarratorStepVoice(narratorId, i, audio);
+                                            }
+                                        } catch (e) {
+                                            console.warn('[CodeArchy] narrator pre-synth failed at step', i, e);
+                                        }
+                                    }
+                                })();
+                            }
                         } catch (e) {
                             console.error('[CodeArchy] save narrator failed', e);
                         }

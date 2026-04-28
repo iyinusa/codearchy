@@ -5,12 +5,22 @@ import { Icon } from './Icons';
 import {
     appendConversationMessage,
     updateConversationMessage,
+    updateConversationMessageVoice,
+    arrayBufferToPcm,
     deleteConversationMessage,
     clearConversation,
     loadConversation,
     useProjectId,
 } from '../db';
-import { speak as ttsSpeak, stopSpeaking, subscribeSpeaking } from '../voice/ttsManager';
+import {
+    speak as ttsSpeak,
+    stopSpeaking,
+    subscribeSpeaking,
+    synthesizeKokoroAudio,
+    playCachedAudio,
+    isKokoroActive,
+    getActiveKokoroVoiceId,
+} from '../voice/ttsManager';
 
 interface ChatPanelProps {
     isOpen: boolean;
@@ -58,6 +68,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     role: r.role,
                     content: r.content,
                     timestamp: r.timestamp,
+                    voice: r.voice,
+                    voiceId: r.voiceId,
+                    voiceSampleRate: r.voiceSampleRate,
                 }));
                 setMessages(hydrated);
                 // Push history to host so the model context window matches
@@ -131,6 +144,67 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         });
     }, []);
 
+    /**
+     * Cache-aware playback for an assistant message.
+     *  - Kokoro engine + matching cached PCM → instant playback (no overlay).
+     *  - Kokoro engine + stale-or-missing PCM → synthesise via the cache,
+     *    persist, update React state, then play. While synthesising the
+     *    `synthesizeKokoroAudio` helper does NOT toggle the synthesizing
+     *    overlay — feels like a normal TTS even though it took seconds.
+     *  - Web Speech engine → unchanged streaming path via ttsSpeak.
+     */
+    const speakMessage = useCallback((msg: ChatMessage) => {
+        if (!msg.content.trim()) return;
+        const activeVoice = getActiveKokoroVoiceId();
+        if (!isKokoroActive()) {
+            speakNow(msg.content);
+            return;
+        }
+        // Cache hit: voice id matches → play raw PCM immediately.
+        if (msg.voice && msg.voiceSampleRate && msg.voiceId === activeVoice) {
+            const pcm = arrayBufferToPcm(msg.voice);
+            void playCachedAudio(pcm, msg.voiceSampleRate, {
+                onError: () => setIsSpeaking(false),
+            });
+            return;
+        }
+        // Cache miss / mismatch: re-synthesise with the active voice and
+        // persist back so future plays are instant. We deliberately do NOT
+        // surface a loading state — the chat row already shows the speaker
+        // icon, which the user will associate with "voice is working".
+        (async () => {
+            const audio = await synthesizeKokoroAudio(msg.content, activeVoice);
+            if (!audio) {
+                // Kokoro failed → fall back to streaming engine so the user
+                // still hears the answer.
+                speakNow(msg.content);
+                return;
+            }
+            // Patch the cache for this message so subsequent clicks are
+            // instant. Both DB and in-memory state get the new buffer.
+            // Cast required: lib.dom now types `TypedArray.buffer` as
+            // `ArrayBuffer | SharedArrayBuffer`; our PCM is always backed
+            // by a non-shared ArrayBuffer at runtime.
+            const buffer = audio.pcm.buffer.slice(
+                audio.pcm.byteOffset,
+                audio.pcm.byteOffset + audio.pcm.byteLength,
+            ) as ArrayBuffer;
+            if (msg.id !== undefined) {
+                updateConversationMessageVoice(msg.id, audio).catch(e =>
+                    console.error('[CodeArchy] persist message voice failed', e),
+                );
+            }
+            setMessages(cur => cur.map(m =>
+                m.id !== undefined && m.id === msg.id
+                    ? { ...m, voice: buffer, voiceId: audio.voiceId, voiceSampleRate: audio.sampleRate }
+                    : m,
+            ));
+            void playCachedAudio(audio.pcm, audio.sampleRate, {
+                onError: () => setIsSpeaking(false),
+            });
+        })();
+    }, [speakNow]);
+
     // Mirror the TTS manager's speaking state into local UI state so the
     // speaker / stop icon swaps correctly even when Kokoro audio playback
     // ends asynchronously.
@@ -175,6 +249,12 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         setIsStreaming(false);
                         return;
                     }
+                    // Snapshot auto-speak intent now — when Kokoro is the
+                    // active engine we route playback through the cache
+                    // pre-synth task instead of the streaming speakNow().
+                    const wantsAutoSpeak = autoSpeakOnNextReplyRef.current;
+                    autoSpeakOnNextReplyRef.current = false;
+                    const kokoroPath = isKokoroActive();
                     // Finalize the streaming assistant message (or append a
                     // new one if nothing streamed) and persist it to the DB.
                     const pid = projectIdRef.current;
@@ -197,6 +277,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         }
                         if (pid) {
                             (async () => {
+                                let messageId: number | undefined = finalized.id;
                                 try {
                                     if (finalized.id !== undefined) {
                                         await updateConversationMessage(finalized.id, {
@@ -208,6 +289,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                             content: finalized.content,
                                             timestamp: finalized.timestamp,
                                         });
+                                        messageId = id;
                                         // Patch the id back into state once persisted.
                                         setMessages(cur => cur.map(m =>
                                             m === finalized || (m.timestamp === finalized.timestamp && m.role === finalized.role && m.id === undefined)
@@ -218,13 +300,56 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                 } catch (e) {
                                     console.error('[CodeArchy] persist assistant failed', e);
                                 }
+                                // Background voice cache: synthesise the
+                                // assistant reply and store the PCM so any
+                                // future playback (or the auto-speak path
+                                // below) is instant. Streaming output stays
+                                // untouched — the cache job runs silently
+                                // in parallel with the user reading the text.
+                                if (kokoroPath) {
+                                    const voiceId = getActiveKokoroVoiceId();
+                                    const audio = await synthesizeKokoroAudio(
+                                        finalized.content,
+                                        voiceId,
+                                    );
+                                    if (audio) {
+                                        const buffer = audio.pcm.buffer.slice(
+                                            audio.pcm.byteOffset,
+                                            audio.pcm.byteOffset + audio.pcm.byteLength,
+                                        ) as ArrayBuffer;
+                                        if (messageId !== undefined) {
+                                            updateConversationMessageVoice(messageId, audio).catch(e =>
+                                                console.error('[CodeArchy] persist message voice failed', e),
+                                            );
+                                        }
+                                        setMessages(cur => cur.map(m =>
+                                            (messageId !== undefined && m.id === messageId)
+                                                || (m === finalized)
+                                                ? { ...m, voice: buffer, voiceId: audio.voiceId, voiceSampleRate: audio.sampleRate }
+                                                : m,
+                                        ));
+                                        if (wantsAutoSpeak) {
+                                            // Voice-input auto-reply: play
+                                            // the cached PCM the moment it's
+                                            // ready. Feels like classic TTS.
+                                            void playCachedAudio(audio.pcm, audio.sampleRate, {
+                                                onError: () => setIsSpeaking(false),
+                                            });
+                                        }
+                                    } else if (wantsAutoSpeak) {
+                                        // Synthesis failed → fall back so
+                                        // the user still hears the answer.
+                                        speakNow(finalized.content);
+                                    }
+                                }
                             })();
                         }
                         return next;
                     });
                     setIsStreaming(false);
-                    if (autoSpeakOnNextReplyRef.current) {
-                        autoSpeakOnNextReplyRef.current = false;
+                    // Web-Speech path keeps the original streaming behaviour
+                    // — audio starts immediately, no cache involved.
+                    if (wantsAutoSpeak && !kokoroPath) {
                         speakNow(response.content);
                     }
                     // Fire-and-forget narrator generation: ask the host to
@@ -437,16 +562,20 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     }, [isRecording]);
 
     // --- Audio: Text-to-Speech ---
+    // Toggle playback for an assistant message. Routes through the
+    // cache-aware `speakMessage` helper so Kokoro plays from IndexedDB
+    // when available and only re-synthesises when the active voice
+    // changed (or no cache exists yet).
     const speakText = useCallback(
-        (text: string) => {
+        (msg: ChatMessage) => {
             if (isSpeaking) {
                 stopSpeaking();
                 setIsSpeaking(false);
                 return;
             }
-            speakNow(text);
+            speakMessage(msg);
         },
-        [isSpeaking, speakNow]
+        [isSpeaking, speakMessage]
     );
 
     if (!isOpen) {
@@ -532,7 +661,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                 {msg.role === 'assistant' && !msg.isStreaming && (
                                     <button
                                         className="chat-speak-btn"
-                                        onClick={() => speakText(msg.content)}
+                                        onClick={() => speakText(msg)}
                                         title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
                                     >
                                         <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />

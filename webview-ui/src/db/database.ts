@@ -45,6 +45,14 @@ export interface ConversationMessageRecord {
     role: 'user' | 'assistant' | 'system';
     content: string;
     timestamp: number;
+    /** Cached Kokoro-synthesised PCM (Float32, mono) for this message.
+     *  Stored as a raw ArrayBuffer in IndexedDB. Null until the background
+     *  synthesiser produces audio (assistant messages only). */
+    voice?: ArrayBuffer;
+    /** Kokoro voice id the cached PCM was generated with. */
+    voiceId?: string;
+    /** Sample rate of the cached PCM (Hz). */
+    voiceSampleRate?: number;
 }
 
 /** Persisted AI-generated narration timeline, driven by the Narrator feature.
@@ -60,6 +68,13 @@ export interface NarratorStepRecord {
     action: 'focus' | 'highlight' | 'zoom';
     /** Optional hint for how long to dwell on this step if TTS is unavailable. */
     durationMs?: number;
+    /** Cached Kokoro-synthesised PCM for this step's narration. Populated by
+     *  the background pre-synth pass kicked off after narrator creation. */
+    voice?: ArrayBuffer;
+    /** Kokoro voice id the cached PCM was generated with. */
+    voiceId?: string;
+    /** Sample rate of the cached PCM (Hz). */
+    voiceSampleRate?: number;
 }
 
 export interface NarratorRecord {
@@ -98,6 +113,17 @@ export class CodeArchyDatabase extends Dexie {
         });
         // v2 — narrators table for AI narration timelines
         this.version(2).stores({
+            projects: 'id, path, updatedAt',
+            flows: 'projectId',
+            cytoscape: 'projectId',
+            systems: 'projectId',
+            conversations: '++id, projectId, timestamp',
+            narrators: '++id, projectId, updatedAt, messageTimestamp',
+        });
+        // v3 — adds voice / voiceId / voiceSampleRate to conversations &
+        // narrator steps. No index changes needed; the new fields are simply
+        // additional columns on existing rows.
+        this.version(3).stores({
             projects: 'id, path, updatedAt',
             flows: 'projectId',
             cytoscape: 'projectId',

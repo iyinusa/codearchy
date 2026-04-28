@@ -14,6 +14,8 @@
  *   speak  → { type:'speak', id:number, text:string, voice?:string }
  *   chunk  ← { type:'chunk', id:number, pcm:Float32Array, sampleRate:number }
  *   end    ← { type:'end', id:number }
+ *   generate  → { type:'generate', id:number, text:string, voice?:string }
+ *   generated ← { type:'generated', id:number, pcm:Float32Array, sampleRate:number }
  *   stop   → { type:'stop' }
  *   error  ← { type:'error', id?:number, message:string }
  *
@@ -52,6 +54,7 @@ type WorkerMsg =
     | { type: 'init'; modelBase: string; ortBase: string }
     | { type: 'warm'; voice: string }
     | { type: 'speak'; id: number; text: string; voice?: string }
+    | { type: 'generate'; id: number; text: string; voice?: string }
     | { type: 'stop' };
 
 function post(data: unknown, transfer?: Transferable[]): void {
@@ -160,6 +163,22 @@ async function synthesise(id: number, text: string, voice: string): Promise<void
     }
 }
 
+/** Single-shot synthesis used by the cache pre-synth pass. Runs the whole
+ *  text through tts.generate() and returns one Float32Array PCM buffer.
+ *  Does not stream — callers receive the result via the 'generated' event. */
+async function generateOnce(text: string, voice: string): Promise<{ pcm: Float32Array; sampleRate: number }> {
+    if (!tts) throw new Error('TTS not initialised');
+    if (!warmedVoices.has(voice)) {
+        const inflight = inflightWarm.get(voice);
+        if (inflight) await inflight;
+        else await warmVoice(voice);
+    }
+    type GenOpts = NonNullable<Parameters<KokoroTTS['generate']>[1]>;
+    const audio = await tts.generate(text, { voice } as unknown as GenOpts);
+    const pcm = new Float32Array(audio.audio as Float32Array);
+    return { pcm, sampleRate: audio.sampling_rate };
+}
+
 self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
     const msg = ev.data;
     try {
@@ -172,6 +191,17 @@ self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
         } else if (msg.type === 'speak') {
             await synthesise(msg.id, msg.text, msg.voice ?? 'af_alloy');
             post({ type: 'end', id: msg.id });
+        } else if (msg.type === 'generate') {
+            // Background, non-streaming synthesis. Used by the cache layer:
+            // produces one PCM buffer for the whole text and posts it back
+            // in a single 'generated' message. Does not interact with the
+            // streaming `speak` lane — both can run concurrently from the
+            // worker's perspective (kokoro-js serialises internally).
+            const result = await generateOnce(msg.text, msg.voice ?? 'af_alloy');
+            post(
+                { type: 'generated', id: msg.id, pcm: result.pcm, sampleRate: result.sampleRate },
+                [result.pcm.buffer],
+            );
         } else if (msg.type === 'stop') {
             stopFlag++;
         }
