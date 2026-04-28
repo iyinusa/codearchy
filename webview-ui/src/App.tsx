@@ -15,7 +15,7 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
-import { startKokoroEngine } from './voice/ttsManager';
+import { startKokoroEngine, subscribeSynthesizing } from './voice/ttsManager';
 import {
     setProjectId,
     getProjectId,
@@ -47,6 +47,9 @@ export function App() {
     const [narrators, setNarrators] = useState<NarratorRecord[]>([]);
     const [narrationViewMode, setNarrationViewMode] = useState<ViewMode | null>(null);
     const [narratedNodeId, setNarratedNodeId] = useState<string | null>(null);
+    /** True while the TTS engine is synthesising audio but no sound has
+     *  started playing yet. Drives the top-right "voice processing" overlay. */
+    const [voiceSynthesizing, setVoiceSynthesizing] = useState(false);
     const mainContentRef = useRef<HTMLDivElement>(null);
     const cytoscapeRef = useRef<CytoscapeViewHandle>(null);
     const reactFlowRef = useRef<ReactFlowViewHandle>(null);
@@ -71,6 +74,12 @@ export function App() {
         void startKokoroEngine().catch((err) => {
             console.warn('[CodeArchy] Kokoro engine failed to start:', err);
         });
+    }, []);
+
+    // Mirror the TTS "synthesizing" flag into local state so we can render
+    // a top-right processing indicator while the engine prepares audio.
+    useEffect(() => {
+        return subscribeSynthesizing(setVoiceSynthesizing);
     }, []);
 
     /** Focus a narrated node, switching to the best-fit view automatically so
@@ -496,6 +505,21 @@ export function App() {
             {/* Voice Selector Modal */}
             {showVoiceSelector && (
                 <VoiceSelector onClose={() => setShowVoiceSelector(false)} />
+            )}
+
+            {/* Voice synthesis overlay — visible only while the TTS engine is
+                preparing audio but hasn't started playing yet. */}
+            {voiceSynthesizing && (
+                <div
+                    className="tts-synth-overlay"
+                    role="status"
+                    aria-live="polite"
+                    aria-label="Processing voice"
+                    title="Processing voice…"
+                >
+                    <div className="tts-synth-spinner" />
+                    <span className="tts-synth-label">Processing voice…</span>
+                </div>
             )}
         </div>
     );

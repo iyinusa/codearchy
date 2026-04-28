@@ -28,13 +28,32 @@ let audioCtx: AudioContext | null = null;
 
 // Each speak() call gets a unique ID so chunks can be matched back.
 let nextId = 1;
+// The ID of the speak request currently being synthesised by the worker.
+let activeId: number | null = null;
 // Tracks whether the worker is actively synthesising (only one at a time).
 let busy = false;
 // The latest pending speak request — if busy, held here until worker is free.
-let queued: { id: number; text: string; voice: string; resolve: () => void; reject: (e: unknown) => void } | null = null;
+let queued: { id: number; text: string; voice: string; resolve: () => void; reject: (e: unknown) => void; onSynthChange?: (synthesizing: boolean) => void } | null = null;
 // Active speak resolve/reject so stop() can clean up.
 let activeResolve: (() => void) | null = null;
 let activeReject: ((e: unknown) => void) | null = null;
+// Fired whenever the playback queue transitions between "audio playing" and
+// "waiting for the next sentence to be synthesised". The unified TTS manager
+// uses this to drive the top-right "Processing voice…" overlay so it appears
+// during EVERY synthesis gap, not just the first.
+let activeOnSynthChange: ((synthesizing: boolean) => void) | null = null;
+// Last value pushed to activeOnSynthChange — avoids redundant fires.
+let activeSynthState: boolean | null = null;
+// Number of PCM chunks received but not yet finished playing. When this hits
+// zero and the worker hasn't sent `end` yet, we are in a synthesis gap.
+let pendingPlayCount = 0;
+// Set to true once the worker emits `end` for the active speak. Suppresses
+// the "back to synthesizing" transition after the final chunk drains.
+let endReceived = false;
+// Audio source nodes currently scheduled / playing for the active speak.
+// Tracked so kokoroStop() can actually silence them — calling source.stop()
+// is the only way to interrupt a BufferSource that's already started.
+const activeSources = new Set<AudioBufferSourceNode>();
 // Chain of PCM playback promises for the active speak — gapless streaming.
 let playChain: Promise<void> = Promise.resolve();
 let stopFlag = 0;
@@ -61,9 +80,24 @@ async function playPcm(pcm: Float32Array, sampleRate: number, myStop: number): P
         const source = ctx.createBufferSource();
         source.buffer = buffer;
         source.connect(ctx.destination);
-        source.onended = () => { source.disconnect(); resolve(); };
+        activeSources.add(source);
+        source.onended = () => {
+            activeSources.delete(source);
+            source.disconnect();
+            resolve();
+        };
         source.start();
     });
+}
+
+/** Push a synth-state transition to the active onSynthChange listener,
+ *  guarded so we never re-emit the same value. */
+function emitSynthState(synthesizing: boolean): void {
+    if (activeSynthState === synthesizing) return;
+    activeSynthState = synthesizing;
+    const cb = activeOnSynthChange;
+    if (!cb) return;
+    try { cb(synthesizing); } catch { /* ignore */ }
 }
 
 // ── Worker messaging ───────────────────────────────────────────────────────
@@ -80,7 +114,25 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
 
     if (msg.type === 'chunk') {
         const myStop = stopFlag;
-        playChain = playChain.then(() => playPcm(msg.pcm, msg.sampleRate, myStop));
+        // Ignore stale chunks from a cancelled / superseded speak.
+        if (msg.id !== activeId) return;
+        pendingPlayCount++;
+        const pcm = msg.pcm;
+        const sampleRate = msg.sampleRate;
+        playChain = playChain.then(async () => {
+            if (stopFlag !== myStop) return;
+            // About to play this chunk → audio is now flowing, so we are no
+            // longer in a "synthesizing" gap.
+            emitSynthState(false);
+            await playPcm(pcm, sampleRate, myStop);
+            if (stopFlag !== myStop) return;
+            pendingPlayCount = Math.max(0, pendingPlayCount - 1);
+            // If nothing is queued and the worker hasn't finished synthesising
+            // yet, we're back in a gap waiting for the next sentence.
+            if (pendingPlayCount === 0 && !endReceived) {
+                emitSynthState(true);
+            }
+        });
         return;
     }
 
@@ -90,22 +142,40 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
     }
 
     if (msg.type === 'end') {
+        // Ignore end events for speaks that were already cancelled.
+        if (msg.id !== activeId) { flushQueued(); return; }
+        endReceived = true;
         busy = false;
+        activeId = null;
         const resolve = activeResolve;
         activeResolve = null;
         activeReject = null;
-        // Wait for all buffered audio to finish, then resolve.
-        playChain.then(() => resolve?.());
+        // Wait for all buffered audio to finish, then emit final synth=false
+        // (covers the edge case where the gap-state was true) and resolve.
+        playChain.then(() => {
+            emitSynthState(false);
+            activeOnSynthChange = null;
+            activeSynthState = null;
+            resolve?.();
+        });
         // Flush next queued speak if any.
         flushQueued();
         return;
     }
 
     if (msg.type === 'error') {
+        // Ignore errors for speaks that were already cancelled.
+        if (msg.id !== undefined && msg.id !== activeId) { return; }
         busy = false;
+        activeId = null;
         const reject = activeReject;
         activeResolve = null;
         activeReject = null;
+        emitSynthState(false);
+        activeOnSynthChange = null;
+        activeSynthState = null;
+        pendingPlayCount = 0;
+        endReceived = false;
         reject?.(new Error(msg.message));
         flushQueued();
         return;
@@ -115,12 +185,20 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
 function flushQueued(): void {
     const w = worker;
     if (!queued || busy || !w) return;
-    const { id, text, voice, resolve, reject } = queued;
+    const { id, text, voice, resolve, reject, onSynthChange } = queued;
     queued = null;
     busy = true;
+    activeId = id;
     activeResolve = resolve;
     activeReject = reject;
+    activeOnSynthChange = onSynthChange ?? null;
+    activeSynthState = null;
+    pendingPlayCount = 0;
+    endReceived = false;
     playChain = Promise.resolve();
+    // We are about to send the speak request — caller's UI should reflect a
+    // synthesizing state until the first chunk plays.
+    emitSynthState(true);
     w.postMessage({ type: 'speak', id, text, voice });
 }
 
@@ -182,6 +260,13 @@ export function isKokoroReady(): boolean {
 
 export interface KokoroSpeakOptions {
     voice?: string;
+    /**
+     * Fired whenever the speak transitions between "synthesising / waiting
+     * for next chunk" (true) and "audio actively playing" (false). Called
+     * once with `true` right at start, and again every time the playback
+     * queue empties before the worker has finished generating audio.
+     */
+    onSynthChange?: (synthesizing: boolean) => void;
     onEnd?: () => void;
     onError?: (err: unknown) => void;
 }
@@ -201,16 +286,24 @@ export function kokoroSpeak(text: string, options: KokoroSpeakOptions = {}): Pro
     return new Promise<void>((resolve, reject) => {
         const wrappedResolve = () => { options.onEnd?.(); resolve(); };
         const wrappedReject = (e: unknown) => { options.onError?.(e); reject(e); };
+        const wrappedOnSynthChange = options.onSynthChange;
 
         if (busy) {
             // Latest-wins: discard previous queued item.
             if (queued) queued.resolve();
-            queued = { id, text, voice, resolve: wrappedResolve, reject: wrappedReject };
+            queued = { id, text, voice, resolve: wrappedResolve, reject: wrappedReject, onSynthChange: wrappedOnSynthChange };
         } else {
             busy = true;
+            activeId = id;
             activeResolve = wrappedResolve;
             activeReject = wrappedReject;
+            activeOnSynthChange = wrappedOnSynthChange ?? null;
+            activeSynthState = null;
+            pendingPlayCount = 0;
+            endReceived = false;
             playChain = Promise.resolve();
+            // We're about to start synthesising — tell the caller.
+            emitSynthState(true);
             w.postMessage({ type: 'speak', id, text, voice });
         }
     });
@@ -220,9 +313,25 @@ export function kokoroStop(): void {
     stopFlag++;
     queued = null;
     busy = false;
+    activeId = null;
     activeResolve = null;
     activeReject = null;
+    // Hide any "Processing voice…" overlay immediately on user-initiated stop.
+    emitSynthState(false);
+    activeOnSynthChange = null;
+    activeSynthState = null;
+    pendingPlayCount = 0;
+    endReceived = false;
     playChain = Promise.resolve();
+    // Silence audio that is currently playing or scheduled. BufferSource
+    // playback can ONLY be interrupted via source.stop() — without this,
+    // already-started chunks keep playing to completion even though the
+    // worker has stopped emitting new ones.
+    activeSources.forEach(src => {
+        try { src.onended = null; src.stop(); } catch { /* ignore */ }
+        try { src.disconnect(); } catch { /* ignore */ }
+    });
+    activeSources.clear();
     worker?.postMessage({ type: 'stop' });
 }
 

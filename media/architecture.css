@@ -2469,3 +2469,55 @@ body {
     white-space: normal;
     word-break: break-word;
 }
+
+/* ===== Voice synthesis overlay ===== */
+/* Top-right floating chip shown while TTS is preparing audio but hasn't
+   started playing yet. Stays above webviews/modals so it's always visible. */
+.tts-synth-overlay {
+    position: fixed;
+    top: 56px;
+    right: 18px;
+    z-index: 10000;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px 6px 10px;
+    /* background: var(--vscode-notifications-background, var(--node-bg));
+    color: var(--vscode-notifications-foreground, var(--fg)); */
+    background: #7c4dff;
+    color: #fff;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    font-size: 12px;
+    line-height: 1;
+    pointer-events: none;
+    animation: tts-synth-fade-in 160ms ease-out;
+}
+
+.tts-synth-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex: 0 0 auto;
+}
+
+.tts-synth-label {
+    white-space: nowrap;
+    opacity: 0.9;
+}
+
+@keyframes tts-synth-fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}

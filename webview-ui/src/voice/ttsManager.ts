@@ -63,6 +63,39 @@ export function subscribeSpeaking(listener: (s: boolean) => void): () => void {
     return () => { speakingListeners.delete(listener); };
 }
 
+// ── Synthesizing state ──────────────────────────────────────
+//
+// True from the moment speak() is invoked until audio actually starts
+// playing (Kokoro: first PCM chunk; Web Speech: utter.onstart). Lets the
+// UI show a "voice processing" indicator while the engine is synthesising
+// but no sound has been emitted yet.
+
+let activeSynthesizing = false;
+const synthListeners = new Set<(s: boolean) => void>();
+// Monotonically-increasing token. Each speak() call bumps this so stale
+// async callbacks from a previous utterance (e.g. Web Speech's onerror
+// firing after ss.cancel()) cannot clear the overlay for a newer speak.
+let synthGeneration = 0;
+
+function setSynthesizing(s: boolean): void {
+    if (activeSynthesizing === s) return;
+    activeSynthesizing = s;
+    synthListeners.forEach(l => { try { l(s); } catch { /* ignore */ } });
+}
+
+/** Only clear synthesizing if the generation token hasn't been superseded. */
+function clearSynthesizingIfCurrent(gen: number): void {
+    if (synthGeneration === gen) setSynthesizing(false);
+}
+
+export function isSynthesizing(): boolean { return activeSynthesizing; }
+
+export function subscribeSynthesizing(listener: (s: boolean) => void): () => void {
+    synthListeners.add(listener);
+    listener(activeSynthesizing);
+    return () => { synthListeners.delete(listener); };
+}
+
 // ── Kokoro load state ───────────────────────────────────────────────────────
 
 type KokoroStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -158,6 +191,7 @@ export function stopSpeaking(): void {
     kokoroStop();
     try { if (window.speechSynthesis?.speaking) window.speechSynthesis.cancel(); } catch { /* ignore */ }
     setSpeaking(false);
+    setSynthesizing(false);
 }
 
 // ── Speak engines ───────────────────────────────────────────────────────────
@@ -167,9 +201,9 @@ interface SpeakOpts {
     onError?: (e: unknown) => void;
 }
 
-function speakWebSpeech(text: string, opts: SpeakOpts): void {
+function speakWebSpeech(text: string, opts: SpeakOpts, gen: number): void {
     const ss = window.speechSynthesis;
-    if (!ss) { opts.onError?.(new Error('SpeechSynthesis unavailable')); return; }
+    if (!ss) { clearSynthesizingIfCurrent(gen); opts.onError?.(new Error('SpeechSynthesis unavailable')); return; }
 
     const cfg = getVoiceConfig();
     const utter = new SpeechSynthesisUtterance(text);
@@ -180,13 +214,14 @@ function speakWebSpeech(text: string, opts: SpeakOpts): void {
     }
 
     let done = false;
-    const finish = () => { if (done) return; done = true; setSpeaking(false); opts.onEnd?.(); };
+    const finish = () => { if (done) return; done = true; setSpeaking(false); clearSynthesizingIfCurrent(gen); opts.onEnd?.(); };
     const fail = (e: SpeechSynthesisErrorEvent | Event) => {
-        if (done) return; done = true; setSpeaking(false);
+        if (done) return; done = true; setSpeaking(false); clearSynthesizingIfCurrent(gen);
         const err = e as SpeechSynthesisErrorEvent;
         if (err?.error === 'interrupted' || err?.error === 'canceled') opts.onEnd?.();
         else opts.onError?.(e);
     };
+    utter.onstart = () => { clearSynthesizingIfCurrent(gen); };
     utter.onend = finish;
     utter.onerror = fail;
 
@@ -195,17 +230,27 @@ function speakWebSpeech(text: string, opts: SpeakOpts): void {
     setTimeout(() => { if (!done) { try { ss.speak(utter); } catch (e) { fail(e as Event); } } }, 50);
 }
 
-async function speakKokoro(text: string, opts: SpeakOpts): Promise<void> {
+async function speakKokoro(text: string, opts: SpeakOpts, gen: number): Promise<void> {
     const cfg = getVoiceConfig();
     setSpeaking(true);
     try {
         await kokoroSpeak(text, {
             voice: cfg.voiceId ?? undefined,
-            onEnd: () => { setSpeaking(false); opts.onEnd?.(); },
-            onError: (e) => { setSpeaking(false); opts.onError?.(e); },
+            // Kokoro fires this every time it transitions between
+            // "synthesising the next sentence" (true) and "audio playing"
+            // (false). Mirror it directly into the synthesizing state so the
+            // top-right "Processing voice…" overlay appears during EVERY
+            // synthesis gap, not just the first.
+            onSynthChange: (synthesizing) => {
+                if (synthGeneration !== gen) return;
+                setSynthesizing(synthesizing);
+            },
+            onEnd: () => { setSpeaking(false); clearSynthesizingIfCurrent(gen); opts.onEnd?.(); },
+            onError: (e) => { setSpeaking(false); clearSynthesizingIfCurrent(gen); opts.onError?.(e); },
         });
     } catch {
         setSpeaking(false);
+        clearSynthesizingIfCurrent(gen);
         throw new Error('Kokoro error');
     }
 }
@@ -215,12 +260,14 @@ export async function speak(text: string, opts: SpeakOpts = {}): Promise<void> {
     const clean = cleanText(text);
     if (!clean) return;
     stopSpeaking();
+    const gen = ++synthGeneration;
+    setSynthesizing(true);
     const { engine } = getVoiceConfig();
     if (engine === 'kokoro' && isKokoroReady()) {
         try {
-            await speakKokoro(clean, opts);
+            await speakKokoro(clean, opts, gen);
             return;
         } catch { /* fall through to Web Speech */ }
     }
-    speakWebSpeech(clean, opts);
+    speakWebSpeech(clean, opts, gen);
 }

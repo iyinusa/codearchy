@@ -221,7 +221,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                         <p className="voice-section-desc">
                             Kokoro-82M is pre-bundled with the extension. Pick a voice and tap
                             <strong> Test</strong> to preview.
-                            <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-20 sec to process). Still in Beta stage.</p>
+                            <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 sec to process paragraph). Still in BETA stage.</p>
                         </p>
                         {kokoroState.status === 'loading' && (
                             <div className="kokoro-progress">
