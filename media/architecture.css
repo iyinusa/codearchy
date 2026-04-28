@@ -1312,6 +1312,16 @@ body {
     margin: 0;
 }
 
+.voice-section-disclaimer {
+    background: #ad0303;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    margin: 5px 0;
+    color: #fff;
+}
+
 .voice-list {
     display: flex;
     flex-direction: column;

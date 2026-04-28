@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = 'onnx-community/Kokoro-82M-v1.0-ONNX';
-const REVISION = 'main';
+const REVISION = 'tree/main';
 const MODEL_BASE = `https://huggingface.co/${REPO}/resolve/${REVISION}`;
 
 // Files needed for KokoroTTS.from_pretrained(REPO, { dtype: 'q8' }).
@@ -28,13 +28,19 @@ const MODEL_FILES = [
     'onnx/model_quantized.onnx',
 ];
 
-// We only ship a curated subset of voices in the extension to keep the VSIX
-// size sane. Add or remove names here to control what ends up in dist/.
+// All English voices bundled with kokoro-js (American + British, F + M).
+// These are copied from the kokoro-js package — no network download needed.
 const VOICES = [
-    'af_heart', 'af_bella', 'af_nicole', 'af_sarah', 'af_sky',
-    'am_michael', 'am_adam', 'am_eric',
-    'bf_emma', 'bf_isabella',
-    'bm_george', 'bm_lewis',
+    // American Female
+    'af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica',
+    'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky',
+    // American Male
+    'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam',
+    'am_michael', 'am_onyx', 'am_puck', 'am_santa',
+    // British Female
+    'bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily',
+    // British Male
+    'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis',
 ];
 
 const ROOT = path.join(__dirname, '..');

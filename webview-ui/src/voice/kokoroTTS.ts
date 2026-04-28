@@ -39,6 +39,10 @@ let activeReject: ((e: unknown) => void) | null = null;
 let playChain: Promise<void> = Promise.resolve();
 let stopFlag = 0;
 
+// Track which voices the worker has already warmed so we don't request the
+// same warm twice. Worker echoes a 'warmed' ack so this stays in sync.
+const warmedVoices = new Set<string>();
+
 // ── AudioContext ───────────────────────────────────────────────────────────
 
 function getAudioCtx(): AudioContext {
@@ -66,6 +70,7 @@ async function playPcm(pcm: Float32Array, sampleRate: number, myStop: number): P
 
 type WorkerOut =
     | { type: 'ready' }
+    | { type: 'warmed'; voice: string }
     | { type: 'chunk'; id: number; pcm: Float32Array; sampleRate: number }
     | { type: 'end'; id: number }
     | { type: 'error'; id?: number; message: string };
@@ -76,6 +81,11 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
     if (msg.type === 'chunk') {
         const myStop = stopFlag;
         playChain = playChain.then(() => playPcm(msg.pcm, msg.sampleRate, myStop));
+        return;
+    }
+
+    if (msg.type === 'warmed') {
+        warmedVoices.add(msg.voice);
         return;
     }
 
@@ -214,4 +224,19 @@ export function kokoroStop(): void {
     activeReject = null;
     playChain = Promise.resolve();
     worker?.postMessage({ type: 'stop' });
+}
+
+/**
+ * Pre-warm a voice in the worker so the first speak() with it is instant.
+ * Idempotent — safe to call repeatedly. No-op if Kokoro isn't ready yet.
+ * Fire-and-forget: callers don't need to await unless they want to gate UI.
+ */
+export function kokoroWarm(voice: string): void {
+    if (!ready || !worker) return;
+    if (warmedVoices.has(voice)) return;
+    // Optimistically mark so we don't spam the worker; the 'warmed' ack will
+    // confirm. If the worker fails silently it's still cheap to retry on the
+    // next voice change.
+    warmedVoices.add(voice);
+    worker.postMessage({ type: 'warm', voice });
 }

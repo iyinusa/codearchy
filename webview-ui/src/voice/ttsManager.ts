@@ -14,7 +14,9 @@
  */
 
 import { getVoiceConfig } from './voiceConfig';
-import { initKokoro, isKokoroReady, kokoroSpeak, kokoroStop } from './kokoroTTS';
+import { initKokoro, isKokoroReady, kokoroSpeak, kokoroStop, kokoroWarm } from './kokoroTTS';
+import { subscribeVoiceConfig } from './voiceConfig';
+import { DEFAULT_KOKORO_VOICE } from './kokoroVoices';
 
 // ── Text sanitiser ──────────────────────────────────────────────────────────
 
@@ -99,12 +101,28 @@ export function startKokoroEngine(): Promise<void> {
     }
     setKokoroStatus('loading');
     return initKokoro()
-        .then(() => setKokoroStatus('ready'))
+        .then(() => {
+            setKokoroStatus('ready');
+            // Warm the user's currently-selected voice so their FIRST speak()
+            // is instant. The worker also warms af_alloy during init; if the
+            // user picked something else we need to warm that one too.
+            const cfg = getVoiceConfig();
+            const voice = cfg.voiceId ?? DEFAULT_KOKORO_VOICE;
+            kokoroWarm(voice);
+        })
         .catch(err => {
             setKokoroStatus('error', err instanceof Error ? err.message : String(err));
             throw err;
         });
 }
+
+// Whenever the user picks a different Kokoro voice, pre-warm it in the worker
+// so switching voices doesn't reintroduce cold-start latency on the next speak.
+subscribeVoiceConfig((cfg) => {
+    if (cfg.engine !== 'kokoro') return;
+    if (!isKokoroReady()) return;
+    kokoroWarm(cfg.voiceId ?? DEFAULT_KOKORO_VOICE);
+});
 
 // ── Web Speech voices ───────────────────────────────────────────────────────
 
