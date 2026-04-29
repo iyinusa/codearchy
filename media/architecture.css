@@ -2337,7 +2337,33 @@ body {
     color: var(--vscode-descriptionForeground, #8a8a8a);
 }
 
+/* Right-side container: shows time-ago normally; swaps to action
+   buttons on hover / when the narrator is active. */
+.narrator-right {
+    position: relative;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 48px;
+}
+
+.narrator-time {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #8a8a8a);
+    white-space: nowrap;
+    transition: opacity 0.12s ease;
+    opacity: 1;
+}
+
+.narrator-item:hover .narrator-time,
+.narrator-item.active .narrator-time {
+    opacity: 0;
+}
+
 .narrator-actions {
+    position: absolute;
+    right: 0;
     display: flex;
     gap: 2px;
     opacity: 0;
@@ -2377,6 +2403,78 @@ body {
 
 .narrator-icon-btn.danger:hover:not(:disabled) {
     color: var(--vscode-errorForeground, #f48771);
+}
+
+/* Delete confirmation dialog */
+.narrator-delete-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.narrator-delete-dialog {
+    background: var(--vscode-editor-background, #1e1e1e);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    min-width: 280px;
+    max-width: 360px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.narrator-delete-dialog-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+}
+
+.narrator-delete-dialog-body {
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground, #8a8a8a);
+    line-height: 1.5;
+}
+
+.narrator-delete-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.narrator-delete-btn {
+    padding: 5px 14px;
+    border-radius: 3px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.narrator-delete-btn.cancel {
+    background: transparent;
+    color: var(--fg);
+    border-color: var(--border);
+}
+
+.narrator-delete-btn.cancel:hover {
+    background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.08));
+}
+
+.narrator-delete-btn.confirm {
+    background: var(--vscode-errorForeground, #f48771);
+    color: #fff;
+    border-color: transparent;
+}
+
+.narrator-delete-btn.confirm:hover {
+    filter: brightness(0.88);
 }
 
 .narrator-timeline {
