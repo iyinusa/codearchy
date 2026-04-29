@@ -4,6 +4,15 @@ import type { NarratorRecord } from '../db';
 import { deleteNarrator, updateNarratorTitle } from '../db';
 import { Icon } from './Icons';
 
+function timeAgo(ts: number): string {
+    const diff = Math.floor((Date.now() - ts) / 1000);
+    if (diff < 60) return `${diff}s`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+    if (diff < 31536000) return `${Math.floor(diff / 86400)}d`;
+    return `${Math.floor(diff / 31536000)}y`;
+}
+
 interface SidebarProps {
     graph: ArchitectureGraph | null;
     searchTerm: string;
@@ -65,7 +74,15 @@ export function Sidebar({
     const [narratorSearch, setNarratorSearch] = useState('');
     const [editingId, setEditingId] = useState<number | null>(null);
     const [editingTitle, setEditingTitle] = useState('');
+    const [deleteConfirmRec, setDeleteConfirmRec] = useState<NarratorRecord | null>(null);
+    const [, setTick] = useState(0);
     const stepsContainerRef = useRef<HTMLDivElement>(null);
+
+    // Refresh time-ago labels every 30 s.
+    useEffect(() => {
+        const id = setInterval(() => setTick(t => t + 1), 30_000);
+        return () => clearInterval(id);
+    }, []);
 
     // Scroll the active narrator step into view whenever it changes.
     useEffect(() => {
@@ -106,10 +123,15 @@ export function Sidebar({
         }
     };
 
-    const handleDelete = async (rec: NarratorRecord) => {
+    const handleDelete = (rec: NarratorRecord) => {
         if (rec.id === undefined) return;
-        // eslint-disable-next-line no-alert
-        if (!window.confirm(`Delete narration "${rec.title}"?`)) return;
+        setDeleteConfirmRec(rec);
+    };
+
+    const confirmDelete = async () => {
+        const rec = deleteConfirmRec;
+        setDeleteConfirmRec(null);
+        if (!rec || rec.id === undefined) return;
         try {
             if (activeNarratorId === rec.id) onNarratorStop();
             await deleteNarrator(rec.id);
@@ -119,290 +141,328 @@ export function Sidebar({
         }
     };
     return (
-        <div className="sidebar">
-            <div className="sidebar-header">
-                {/* HEADER */}
-                <h2>
-                    {window.CODEARCY_ICON_URI && (
-                        <span style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: 28,
-                            height: 28,
-                            borderRadius: '50%',
-                            background: '#fff',
-                            marginRight: 8,
-                            flexShrink: 0,
-                            verticalAlign: 'middle',
-                        }}>
-                            <img
-                                src={window.CODEARCY_ICON_URI}
-                                alt="CodeArchy"
-                                style={{ width: 20, height: 20, borderRadius: '50%', display: 'block' }}
-                            />
-                        </span>
-                    )}
-                    CodeArchy
-                </h2>
+        <>
+            <div className="sidebar">
+                <div className="sidebar-header">
+                    {/* HEADER */}
+                    <h2>
+                        {window.CODEARCY_ICON_URI && (
+                            <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: 28,
+                                height: 28,
+                                borderRadius: '50%',
+                                background: '#fff',
+                                marginRight: 8,
+                                flexShrink: 0,
+                                verticalAlign: 'middle',
+                            }}>
+                                <img
+                                    src={window.CODEARCY_ICON_URI}
+                                    alt="CodeArchy"
+                                    style={{ width: 20, height: 20, borderRadius: '50%', display: 'block' }}
+                                />
+                            </span>
+                        )}
+                        CodeArchy
+                    </h2>
 
-                {/* SEARCH */}
-                <input
-                    type="text"
-                    className="search-input"
-                    placeholder="Filter modules..."
-                    value={searchTerm}
-                    onChange={(e) => onSearchChange(e.target.value)}
-                />
-            </div>
-
-            {/* SUBSYSTEM LIST */}
-            <div className="subsystem-list">
-                {!graph || graph.subsystems.length === 0 ? (
-                    <div className="empty-state">
-                        {graph ? 'No subsystems detected' : 'Run analysis to begin'}
-                    </div>
-                ) : (
-                    graph.subsystems.map((sub) => (
-                        <div
-                            key={sub.id}
-                            className={`subsystem-item ${highlightedSubsystem === sub.id ? 'active' : ''}`}
-                            onClick={() => {
-                                onSubsystemHighlight(
-                                    highlightedSubsystem === sub.id ? null : sub.id
-                                );
-                            }}
-                        >
-                            <div
-                                className="subsystem-dot"
-                                style={{ background: sub.color }}
-                            />
-                            <span className="subsystem-name">{sub.name}</span>
-                            <span className="subsystem-count">{sub.nodeIds.length}</span>
-                        </div>
-                    ))
-                )}
-            </div>
-
-            {/* NARRATIONS */}
-            <div className="narrator-section">
-                <div className="narrator-section-header">
-                    <Icon name="narrator" />
-                    <span>NARRATIONS / EXPLAINERS</span>
-                    <span className="narrator-section-count">{narrators.length}</span>
+                    {/* SEARCH */}
+                    <input
+                        type="text"
+                        className="search-input"
+                        placeholder="Filter modules..."
+                        value={searchTerm}
+                        onChange={(e) => onSearchChange(e.target.value)}
+                    />
                 </div>
-                {narrators.length > 0 && (
-                    <div className="narrator-search-wrap">
-                        <Icon name="search" />
-                        <input
-                            type="text"
-                            className="narrator-search"
-                            placeholder="Search narrations..."
-                            value={narratorSearch}
-                            onChange={(e) => setNarratorSearch(e.target.value)}
-                        />
+
+                {/* SUBSYSTEM LIST */}
+                <div className="subsystem-list">
+                    {!graph || graph.subsystems.length === 0 ? (
+                        <div className="empty-state">
+                            {graph ? 'No subsystems detected' : 'Run analysis to begin'}
+                        </div>
+                    ) : (
+                        graph.subsystems.map((sub) => (
+                            <div
+                                key={sub.id}
+                                className={`subsystem-item ${highlightedSubsystem === sub.id ? 'active' : ''}`}
+                                onClick={() => {
+                                    onSubsystemHighlight(
+                                        highlightedSubsystem === sub.id ? null : sub.id
+                                    );
+                                }}
+                            >
+                                <div
+                                    className="subsystem-dot"
+                                    style={{ background: sub.color }}
+                                />
+                                <span className="subsystem-name">{sub.name}</span>
+                                <span className="subsystem-count">{sub.nodeIds.length}</span>
+                            </div>
+                        ))
+                    )}
+                </div>
+
+                {/* NARRATIONS */}
+                <div className="narrator-section">
+                    <div className="narrator-section-header">
+                        <Icon name="narrator" />
+                        <span>NARRATIONS / EXPLAINERS</span>
+                        <span className="narrator-section-count">{narrators.length}</span>
                     </div>
-                )}
-                <div className="narrator-list">
-                    {narratorGenerating && (
-                        <div className="narrator-item narrator-item-shimmer" aria-label="Generating narration">
-                            <div className="narrator-item-row">
-                                <div className="narrator-play-btn shimmer-circle" />
-                                <div className="narrator-item-body">
-                                    <div className="shimmer-line shimmer-line-title" />
-                                    <div className="shimmer-line shimmer-line-meta" />
+                    {narrators.length > 0 && (
+                        <div className="narrator-search-wrap">
+                            <Icon name="search" />
+                            <input
+                                type="text"
+                                className="narrator-search"
+                                placeholder="Search narrations..."
+                                value={narratorSearch}
+                                onChange={(e) => setNarratorSearch(e.target.value)}
+                            />
+                        </div>
+                    )}
+                    <div className="narrator-list">
+                        {narratorGenerating && (
+                            <div className="narrator-item narrator-item-shimmer" aria-label="Generating narration">
+                                <div className="narrator-item-row">
+                                    <div className="narrator-play-btn shimmer-circle" />
+                                    <div className="narrator-item-body">
+                                        <div className="shimmer-line shimmer-line-title" />
+                                        <div className="shimmer-line shimmer-line-meta" />
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    )}
-                    {narrators.length === 0 && !narratorGenerating ? (
-                        <div className="narrator-empty">
-                            Ask the AI a question — a visual narration of its answer will appear here.
-                        </div>
-                    ) : filteredNarrators.length === 0 ? (
-                        <div className="narrator-empty">No matches.</div>
-                    ) : (
-                        filteredNarrators.map((rec) => {
-                            const isActive = activeNarratorId === rec.id;
-                            const isPlaying = isActive && narratorStatus === 'playing';
-                            const isPaused = isActive && narratorStatus === 'paused';
-                            const isEditing = editingId === rec.id;
-                            const synth = rec.id !== undefined ? narratorSynthProgress?.[rec.id] : undefined;
-                            const synthPct = synth && synth.total > 0
-                                ? Math.min(100, Math.round((synth.done / synth.total) * 100))
-                                : 0;
-                            const isPreparing = !!synth;
-                            return (
-                                <div
-                                    key={rec.id}
-                                    className={`narrator-item ${isActive ? 'active' : ''} ${isPlaying ? 'playing' : ''}`}
-                                >
-                                    <div className="narrator-item-row">
-                                        <button
-                                            className={`narrator-play-btn${isPreparing ? ' preparing' : ''}`}
-                                            title={
-                                                isPreparing
-                                                    ? `Preparing voice… ${synthPct}%`
-                                                    : isPlaying
-                                                        ? 'Pause narration'
-                                                        : isPaused
-                                                            ? 'Resume narration'
-                                                            : 'Play narration'
-                                            }
-                                            style={isPreparing
-                                                ? ({ ['--voice-progress' as string]: `${synthPct}%` } as React.CSSProperties)
-                                                : undefined}
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (isPlaying) onNarratorPause();
-                                                else if (isPaused) onNarratorResume();
-                                                else onNarratorPlay(rec);
-                                            }}
-                                        >
-                                            <span className="narrator-play-ring" aria-hidden="true" />
-                                            <Icon name={isPlaying ? 'pause' : 'play'} />
-                                        </button>
-                                        <div className="narrator-item-body">
-                                            {isEditing ? (
-                                                <input
-                                                    autoFocus
-                                                    className="narrator-title-input"
-                                                    value={editingTitle}
-                                                    onChange={(e) => setEditingTitle(e.target.value)}
-                                                    onBlur={() => rec.id !== undefined && commitTitle(rec.id)}
-                                                    onKeyDown={(e) => {
-                                                        if (e.key === 'Enter') {
-                                                            e.preventDefault();
-                                                            (e.target as HTMLInputElement).blur();
-                                                        } else if (e.key === 'Escape') {
-                                                            setEditingId(null);
-                                                        }
-                                                    }}
-                                                />
-                                            ) : (
-                                                <div className="narrator-title" title={rec.question}>{rec.title}</div>
-                                            )}
-                                            <div className="narrator-meta">
-                                                {rec.steps.length} step{rec.steps.length === 1 ? '' : 's'}
-                                            </div>
-                                        </div>
-                                        <div className="narrator-actions">
+                        )}
+                        {narrators.length === 0 && !narratorGenerating ? (
+                            <div className="narrator-empty">
+                                Ask the AI a question — a visual narration of its answer will appear here.
+                            </div>
+                        ) : filteredNarrators.length === 0 ? (
+                            <div className="narrator-empty">No matches.</div>
+                        ) : (
+                            filteredNarrators.map((rec) => {
+                                const isActive = activeNarratorId === rec.id;
+                                const isPlaying = isActive && narratorStatus === 'playing';
+                                const isPaused = isActive && narratorStatus === 'paused';
+                                const isEditing = editingId === rec.id;
+                                const synth = rec.id !== undefined ? narratorSynthProgress?.[rec.id] : undefined;
+                                const synthPct = synth && synth.total > 0
+                                    ? Math.min(100, Math.round((synth.done / synth.total) * 100))
+                                    : 0;
+                                const isPreparing = !!synth;
+                                return (
+                                    <div
+                                        key={rec.id}
+                                        className={`narrator-item ${isActive ? 'active' : ''} ${isPlaying ? 'playing' : ''}`}
+                                    >
+                                        <div className="narrator-item-row">
                                             <button
-                                                className="narrator-icon-btn"
-                                                title="Rename"
+                                                className={`narrator-play-btn${isPreparing ? ' preparing' : ''}`}
+                                                title={
+                                                    isPreparing
+                                                        ? `Preparing voice… ${synthPct}%`
+                                                        : isPlaying
+                                                            ? 'Pause narration'
+                                                            : isPaused
+                                                                ? 'Resume narration'
+                                                                : 'Play narration'
+                                                }
+                                                style={isPreparing
+                                                    ? ({ ['--voice-progress' as string]: `${synthPct}%` } as React.CSSProperties)
+                                                    : undefined}
                                                 onClick={(e) => {
                                                     e.stopPropagation();
-                                                    if (rec.id === undefined) return;
-                                                    setEditingId(rec.id);
-                                                    setEditingTitle(rec.title);
+                                                    if (isPlaying) onNarratorPause();
+                                                    else if (isPaused) onNarratorResume();
+                                                    else onNarratorPlay(rec);
                                                 }}
                                             >
-                                                <Icon name="edit" />
+                                                <span className="narrator-play-ring" aria-hidden="true" />
+                                                <Icon name={isPlaying ? 'pause' : 'play'} />
                                             </button>
-                                            <button
-                                                className="narrator-icon-btn danger"
-                                                title="Delete"
-                                                onClick={(e) => { e.stopPropagation(); handleDelete(rec); }}
-                                            >
-                                                <Icon name="trash" />
-                                            </button>
-                                        </div>
-                                    </div>
-                                    {isActive && (
-                                        <div className="narrator-timeline">
-                                            <div className="narrator-transport">
-                                                <button
-                                                    className="narrator-icon-btn"
-                                                    title="Previous step"
-                                                    onClick={onNarratorPrev}
-                                                    disabled={narratorStepIndex === 0}
-                                                >
-                                                    <Icon name="prevStep" />
-                                                </button>
-                                                <button
-                                                    className="narrator-icon-btn"
-                                                    title={isPlaying ? 'Pause' : 'Resume'}
-                                                    onClick={isPlaying ? onNarratorPause : onNarratorResume}
-                                                >
-                                                    <Icon name={isPlaying ? 'pause' : 'play'} />
-                                                </button>
-                                                <button
-                                                    className="narrator-icon-btn"
-                                                    title="Next step"
-                                                    onClick={onNarratorNext}
-                                                    disabled={narratorStepIndex >= rec.steps.length - 1}
-                                                >
-                                                    <Icon name="nextStep" />
-                                                </button>
-                                                <button
-                                                    className="narrator-icon-btn"
-                                                    title="Stop narration"
-                                                    onClick={onNarratorStop}
-                                                >
-                                                    <Icon name="close" />
-                                                </button>
-                                                <div className="narrator-progress">
-                                                    <div
-                                                        className="narrator-progress-fill"
-                                                        style={{
-                                                            width: `${Math.round(((narratorStepIndex + 1) / Math.max(1, rec.steps.length)) * 100)}%`,
+                                            <div className="narrator-item-body">
+                                                {isEditing ? (
+                                                    <input
+                                                        autoFocus
+                                                        className="narrator-title-input"
+                                                        value={editingTitle}
+                                                        onChange={(e) => setEditingTitle(e.target.value)}
+                                                        onBlur={() => rec.id !== undefined && commitTitle(rec.id)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') {
+                                                                e.preventDefault();
+                                                                (e.target as HTMLInputElement).blur();
+                                                            } else if (e.key === 'Escape') {
+                                                                setEditingId(null);
+                                                            }
                                                         }}
                                                     />
+                                                ) : (
+                                                    <div className="narrator-title" title={rec.question}>{rec.title}</div>
+                                                )}
+                                                <div className="narrator-meta">
+                                                    {rec.steps.length} step{rec.steps.length === 1 ? '' : 's'}
                                                 </div>
                                             </div>
-                                            <div className="narrator-steps" ref={stepsContainerRef}>
-                                                {rec.steps.map((step, i) => (
+                                            <div className="narrator-right">
+                                                <span className="narrator-time">{timeAgo(rec.updatedAt)}</span>
+                                                <div className="narrator-actions">
                                                     <button
-                                                        key={i}
-                                                        className={`narrator-step ${i === narratorStepIndex ? 'active' : ''} ${i < narratorStepIndex ? 'past' : ''}`}
-                                                        onClick={() => onNarratorGoto(i)}
-                                                        title={step.narration}
+                                                        className="narrator-icon-btn"
+                                                        title="Rename"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            if (rec.id === undefined) return;
+                                                            setEditingId(rec.id);
+                                                            setEditingTitle(rec.title);
+                                                        }}
                                                     >
-                                                        <span className="narrator-step-index">{i + 1}</span>
-                                                        <span className="narrator-step-text">{step.narration}</span>
+                                                        <Icon name="edit" />
                                                     </button>
-                                                ))}
+                                                    <button
+                                                        className="narrator-icon-btn danger"
+                                                        title="Delete"
+                                                        onClick={(e) => { e.stopPropagation(); handleDelete(rec); }}
+                                                    >
+                                                        <Icon name="trash" />
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
-                                    )}
-                                </div>
-                            );
-                        })
-                    )}
+                                        {isActive && (
+                                            <div className="narrator-timeline">
+                                                <div className="narrator-transport">
+                                                    <button
+                                                        className="narrator-icon-btn"
+                                                        title="Previous step"
+                                                        onClick={onNarratorPrev}
+                                                        disabled={narratorStepIndex === 0}
+                                                    >
+                                                        <Icon name="prevStep" />
+                                                    </button>
+                                                    <button
+                                                        className="narrator-icon-btn"
+                                                        title={isPlaying ? 'Pause' : 'Resume'}
+                                                        onClick={isPlaying ? onNarratorPause : onNarratorResume}
+                                                    >
+                                                        <Icon name={isPlaying ? 'pause' : 'play'} />
+                                                    </button>
+                                                    <button
+                                                        className="narrator-icon-btn"
+                                                        title="Next step"
+                                                        onClick={onNarratorNext}
+                                                        disabled={narratorStepIndex >= rec.steps.length - 1}
+                                                    >
+                                                        <Icon name="nextStep" />
+                                                    </button>
+                                                    <div className="narrator-progress">
+                                                        <div
+                                                            className="narrator-progress-fill"
+                                                            style={{
+                                                                width: `${Math.round(((narratorStepIndex + 1) / Math.max(1, rec.steps.length)) * 100)}%`,
+                                                            }}
+                                                        />
+                                                    </div>
+                                                    <button
+                                                        className="narrator-icon-btn"
+                                                        title="Stop narration"
+                                                        onClick={onNarratorStop}
+                                                    >
+                                                        <Icon name="close" />
+                                                    </button>
+                                                </div>
+                                                <div className="narrator-steps" ref={stepsContainerRef}>
+                                                    {rec.steps.map((step, i) => (
+                                                        <button
+                                                            key={i}
+                                                            className={`narrator-step ${i === narratorStepIndex ? 'active' : ''} ${i < narratorStepIndex ? 'past' : ''}`}
+                                                            onClick={() => onNarratorGoto(i)}
+                                                            title={step.narration}
+                                                        >
+                                                            <span className="narrator-step-index">{i + 1}</span>
+                                                            <span className="narrator-step-text">{step.narration}</span>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })
+                        )}
+                    </div>
+                </div>
+
+                {/* STATS */}
+                {graph && (
+                    <div className="stats">
+                        <div>{graph.metadata.fileCount} files analyzed</div>
+                        <div>{graph.metadata.totalSymbols} symbols found</div>
+                        <div>{graph.metadata.totalEdges} dependencies</div>
+                        <div>{graph.metadata.languages.join(', ')}</div>
+                    </div>
+                )}
+
+                {/* AI PROCESSING */}
+                <div className="ai-processing">
+                    <div className="ai-processing-label" title="Controls prompt size, token budget, and reasoning depth for the local AI.">
+                        AI Processing
+                    </div>
+                    <div className="ai-processing-toggle" role="radiogroup" aria-label="AI Processing tier">
+                        {PROCESSING_MODES.map((m) => (
+                            <button
+                                key={m.id}
+                                type="button"
+                                role="radio"
+                                aria-checked={processingMode === m.id}
+                                className={`ai-processing-btn ${processingMode === m.id ? 'active' : ''}`}
+                                onClick={() => onProcessingModeChange(m.id)}
+                                title={m.hint}
+                            >
+                                {m.label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
             </div>
 
-            {/* STATS */}
-            {graph && (
-                <div className="stats">
-                    <div>{graph.metadata.fileCount} files analyzed</div>
-                    <div>{graph.metadata.totalSymbols} symbols found</div>
-                    <div>{graph.metadata.totalEdges} dependencies</div>
-                    <div>{graph.metadata.languages.join(', ')}</div>
+            {/* DELETE CONFIRMATION DIALOG */}
+            {deleteConfirmRec && (
+                <div
+                    className="narrator-delete-overlay"
+                    onClick={() => setDeleteConfirmRec(null)}
+                >
+                    <div
+                        className="narrator-delete-dialog"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="narrator-delete-dialog-title">Delete Narration</div>
+                        <div className="narrator-delete-dialog-body">
+                            Are you sure you want to delete{' '}
+                            <strong>{deleteConfirmRec.title}</strong>? This cannot be undone.
+                        </div>
+                        <div className="narrator-delete-dialog-actions">
+                            <button
+                                className="narrator-delete-btn cancel"
+                                onClick={() => setDeleteConfirmRec(null)}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                className="narrator-delete-btn confirm"
+                                onClick={confirmDelete}
+                            >
+                                Delete
+                            </button>
+                        </div>
+                    </div>
                 </div>
             )}
-
-            {/* AI PROCESSING */}
-            <div className="ai-processing">
-                <div className="ai-processing-label" title="Controls prompt size, token budget, and reasoning depth for the local AI.">
-                    AI Processing
-                </div>
-                <div className="ai-processing-toggle" role="radiogroup" aria-label="AI Processing tier">
-                    {PROCESSING_MODES.map((m) => (
-                        <button
-                            key={m.id}
-                            type="button"
-                            role="radio"
-                            aria-checked={processingMode === m.id}
-                            className={`ai-processing-btn ${processingMode === m.id ? 'active' : ''}`}
-                            onClick={() => onProcessingModeChange(m.id)}
-                            title={m.hint}
-                        >
-                            {m.label}
-                        </button>
-                    ))}
-                </div>
-            </div>
-        </div>
+        </>
     );
 }
