@@ -290,15 +290,73 @@ export async function speak(text: string, opts: SpeakOpts = {}): Promise<void> {
 // — no "Processing voice…" overlay flashes for cached clips, which makes
 // Kokoro feel like a conventional TTS even though synthesis took seconds.
 
+// ── Kokoro synthesis priority queue ─────────────────────────────────────────
+//
+// Kokoro runs in a single Web Worker → only ONE generate() can be in flight
+// at a time. When chat replies and narrator stories race for the engine the
+// narrator stalls behind a long message synth. We serialise all callers
+// through a tiny priority queue: narrator jobs jump ahead of any pending
+// message jobs (without preempting the in-flight one).
+
+export type KokoroJobPriority = 'narrator' | 'message';
+
+interface KokoroJob {
+    priority: KokoroJobPriority;
+    text: string;
+    voiceId: string;
+    onProgress?: (done: number, total: number) => void;
+    resolve: (value: KokoroAudio | null) => void;
+}
+
+const kokoroQueue: KokoroJob[] = [];
+let kokoroQueueRunning = false;
+
+function enqueueKokoroJob(job: KokoroJob): void {
+    if (job.priority === 'narrator') {
+        // Insert before the first 'message' job so narrator stories play
+        // through ASAP. Preserves narrator-vs-narrator FIFO order.
+        const idx = kokoroQueue.findIndex(j => j.priority === 'message');
+        if (idx === -1) kokoroQueue.push(job);
+        else kokoroQueue.splice(idx, 0, job);
+    } else {
+        kokoroQueue.push(job);
+    }
+    void runKokoroQueue();
+}
+
+async function runKokoroQueue(): Promise<void> {
+    if (kokoroQueueRunning) return;
+    kokoroQueueRunning = true;
+    try {
+        while (kokoroQueue.length) {
+            const job = kokoroQueue.shift()!;
+            try {
+                const audio = await kokoroGenerate(job.text, job.voiceId, job.onProgress);
+                job.resolve(audio);
+            } catch (err) {
+                console.warn('[CodeArchy] kokoroGenerate failed:', err);
+                job.resolve(null);
+            }
+        }
+    } finally {
+        kokoroQueueRunning = false;
+    }
+}
+
 /**
  * Synthesise a complete utterance via Kokoro and return the raw PCM. Callers
  * persist the result so subsequent playbacks bypass the model. Returns null
  * when the input is empty after sanitisation or Kokoro isn't available.
+ *
+ * `priority` lets narrator-story synths jump ahead of pending chat-message
+ * synths so users hear the story without waiting for queued message audio
+ * to finish. Defaults to 'message'.
  */
 export async function synthesizeKokoroAudio(
     text: string,
     voiceId?: string,
     onProgress?: (done: number, total: number) => void,
+    priority: KokoroJobPriority = 'message',
 ): Promise<KokoroAudio | null> {
     const clean = cleanText(text);
     if (!clean) return null;
@@ -306,12 +364,9 @@ export async function synthesizeKokoroAudio(
         try { await startKokoroEngine(); } catch { return null; }
     }
     const target = voiceId ?? getVoiceConfig().voiceId ?? DEFAULT_KOKORO_VOICE;
-    try {
-        return await kokoroGenerate(clean, target, onProgress);
-    } catch (err) {
-        console.warn('[CodeArchy] kokoroGenerate failed:', err);
-        return null;
-    }
+    return new Promise<KokoroAudio | null>((resolve) => {
+        enqueueKokoroJob({ priority, text: clean, voiceId: target, onProgress, resolve });
+    });
 }
 
 /**

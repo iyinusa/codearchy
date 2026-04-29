@@ -129,7 +129,7 @@ export function useStoryPlayer(
                 const myIndex = index;
                 const myNarratorId = narratorIdRef.current;
                 (async () => {
-                    const audio = await synthesizeKokoroAudio(step.narration, activeVoice);
+                    const audio = await synthesizeKokoroAudio(step.narration, activeVoice, undefined, 'narrator');
                     if (statusRef.current !== 'playing' || stepIndexRef.current !== myIndex) {
                         // Player moved on — drop the result; cache write
                         // would still be nice but the user already paused

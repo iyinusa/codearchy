@@ -5,6 +5,25 @@ import { ArchitectureGraph, WebviewMessage, WebviewMessageType } from '../types'
 import { OllamaService, MODEL_OPTIONS, SystemArchitecture, ProcessingMode } from '../inference/OllamaService';
 import { HostAudioRecorder } from '../audio/HostAudioRecorder';
 
+/**
+ * Detect which diagram the user wants the narrator to walk through, based on
+ * keywords in their question. Defaults to the Flow Diagram (reactflow) — it's
+ * the most granular view and gives the deepest explanation of the codebase.
+ *
+ *   - "system"  → System Diagram (high-level subsystems)
+ *   - "flow"    → Flow Diagram (default, file-level modules + subsystems)
+ *   - "dense"   → Dense Graph (Cytoscape rendering of the same flow data)
+ */
+function detectViewHint(question: string): 'system' | 'flow' | 'dense' {
+  const q = question.toLowerCase();
+  // Use word-boundary matches so a casual word like "systematic" doesn't
+  // hijack the narrator into the System Diagram.
+  if (/\bsystem\b/.test(q)) return 'system';
+  if (/\bdense\b/.test(q)) return 'dense';
+  if (/\bflow\b/.test(q)) return 'flow';
+  return 'flow';
+}
+
 export class ArchitecturePanel {
   private static instance: ArchitecturePanel | undefined;
   private readonly panel: vscode.WebviewPanel;
@@ -481,25 +500,27 @@ export class ArchitecturePanel {
       // we issue the narration request, reducing queue contention on the model.
       await new Promise<void>((r) => setTimeout(r, 500));
 
-      // Build the narrator node list.
-      //
-      // Priority order (most granular → highest value for step-by-step tours):
-      //   1. Individual module nodes from the Flow Diagram (reactflow) — best
-      //      for detailed walkthroughs since modules map 1-to-1 with files.
-      //   2. Subsystem group nodes from the Flow Diagram — good mid-level hops.
-      //   3. System Diagram subsystems — useful for high-level questions.
-      //
-      // The preferredView defaults to 'reactflow' so the narrator walks
-      // through the Flow Diagram by default. App.tsx will switch to the
-      // System view if the narrator picks a system-arch node id.
+      // Detect requested diagram from the user's question. Defaults to the
+      // Flow Diagram (reactflow) — it walks individual modules and is the
+      // most in-depth view. The user can opt into the System Diagram or
+      // the Dense Graph by saying "system", "flow", or "dense" in their
+      // prompt.
+      const viewHint = detectViewHint(payload.question);
 
-      const FLOW_NODE_CAP = 55;
-      const SYS_NODE_CAP = 10;
+      // Build the candidate node list scoped to the chosen diagram so the
+      // AI doesn't pick ids from a view the user wasn't asking about.
+
+      const FLOW_NODE_CAP = 60;
+      const SYS_NODE_CAP = 20;
 
       const nodes: Array<{ id: string; label: string; description?: string }> = [];
 
-      // 1. Module-level nodes (Flow Diagram) — primary source
-      if (this.currentGraph) {
+      if (viewHint === 'system' && this.currentSystemArch?.nodes.length) {
+        for (const n of this.currentSystemArch.nodes.slice(0, SYS_NODE_CAP)) {
+          nodes.push({ id: n.id, label: n.label, description: n.description });
+        }
+      } else if (this.currentGraph) {
+        // Flow / Dense → walk through file-level modules + subsystem groups.
         for (const n of this.currentGraph.nodes.slice(0, FLOW_NODE_CAP)) {
           nodes.push({
             id: n.id,
@@ -507,36 +528,71 @@ export class ArchitecturePanel {
             description: (n.metadata?.language as string) || undefined,
           });
         }
-      }
-
-      // 2. Subsystem groupings from the Flow graph (if not already covered)
-      if (this.currentGraph && nodes.length < FLOW_NODE_CAP) {
-        for (const s of this.currentGraph.subsystems) {
-          if (!nodes.some(n => n.id === s.id)) {
-            nodes.push({ id: s.id, label: s.name, description: s.description });
+        if (nodes.length < FLOW_NODE_CAP) {
+          for (const s of this.currentGraph.subsystems) {
+            if (!nodes.some(n => n.id === s.id)) {
+              nodes.push({ id: s.id, label: s.name, description: s.description });
+            }
           }
         }
       }
 
-      // 3. System Diagram nodes (supplement, capped — lower priority)
-      if (this.currentSystemArch?.nodes.length) {
-        let added = 0;
-        for (const n of this.currentSystemArch.nodes) {
-          if (added >= SYS_NODE_CAP) break;
-          if (!nodes.some(existing => existing.id === n.id)) {
+      // Ultimate fallback: if the requested view has no nodes (e.g. user
+      // asked for "system" before generating one), fall back to whichever
+      // dataset is available so the narrator still produces something.
+      if (nodes.length === 0) {
+        if (this.currentGraph) {
+          for (const n of this.currentGraph.nodes.slice(0, FLOW_NODE_CAP)) {
+            nodes.push({
+              id: n.id,
+              label: n.label,
+              description: (n.metadata?.language as string) || undefined,
+            });
+          }
+        } else if (this.currentSystemArch?.nodes.length) {
+          for (const n of this.currentSystemArch.nodes.slice(0, SYS_NODE_CAP)) {
             nodes.push({ id: n.id, label: n.label, description: n.description });
-            added++;
           }
         }
       }
 
       if (nodes.length === 0) return;
 
-      // Default view: Flow Diagram. App.tsx switches to System view automatically
-      // if the narrator picks a system-arch node id.
-      const preferredView: 'system' | 'reactflow' = 'reactflow';
+      // Two-stage narration pipeline:
+      //   1. Distil the assistant's full answer down to a compact, ordered
+      //      list of architectural flow steps. This survives chunking far
+      //      better than truncating the raw answer because the model has
+      //      already filtered out prose, examples, and rationale.
+      //   2. Pass that distilled flow + the candidate node list to the
+      //      narrator generator, which now has more headroom to map each
+      //      flow step to a node and produce a coherent walkthrough.
+      let keyFlow = '';
+      try {
+        keyFlow = await this.ollamaService.extractKeyFlow(
+          { question: payload.question, answer: payload.answer },
+          modelOpt.ollamaTag,
+          this.processingMode,
+        );
+      } catch (err) {
+        console.warn('[CodeArchy] key-flow extraction failed, using raw answer', err);
+      }
+
+      // The preferredView in the payload is what App.tsx should auto-switch
+      // to when the narrator starts. For 'dense' we still send 'reactflow'
+      // (the type only has two values) — the dense graph is rendered by
+      // CytoscapeView but App.tsx routes node-id matches there separately.
+      const preferredView: 'system' | 'reactflow' =
+        viewHint === 'system' ? 'system' : 'reactflow';
+
       const result = await this.ollamaService.generateNarration(
-        { question: payload.question, answer: payload.answer, nodes, preferredView },
+        {
+          question: payload.question,
+          // Prefer the distilled flow; fall back to the raw answer if the
+          // extraction step failed.
+          answer: keyFlow.trim() || payload.answer,
+          nodes,
+          preferredView,
+        },
         modelOpt.ollamaTag,
         this.processingMode,
       );

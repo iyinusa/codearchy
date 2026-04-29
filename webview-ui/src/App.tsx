@@ -95,7 +95,16 @@ export function App() {
 
     /** Focus a narrated node, switching to the best-fit view automatically so
      *  the target is actually visible. System view is preferred when the id
-     *  matches a subsystem; otherwise fall back to React Flow. */
+     *  matches a subsystem; otherwise fall back to React Flow.
+     *
+     *  Robust against the race between view-mode change and ELK layout —
+     *  `focusNode()` returns false until the node has rendered with a real
+     *  position, so we retry on a short cadence (~50 ms × 60 = up to 3 s)
+     *  until either the focus succeeds or we time out. Without this the
+     *  first step of a story routinely missed its highlight + zoom because
+     *  ReactFlow / SystemView wasn't done laying out yet.
+     */
+    const focusRetryRef = useRef<number | null>(null);
     const focusNarratedNode = useCallback((step: NarratorStep) => {
         setNarratedNodeId(step.targetNodeId);
         const sys = systemArchRef.current;
@@ -104,20 +113,46 @@ export function App() {
         if (viewModeRef.current !== preferredMode) {
             setViewMode(preferredMode);
             setNarrationViewMode(preferredMode);
-            // Defer the imperative focus call until React Flow mounts in the
-            // newly-visible view — a single rAF is enough because both views
-            // render synchronously once their prop changes.
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    const ref = preferredMode === 'system' ? systemViewRef.current : reactFlowRef.current;
-                    ref?.focusNode(step.targetNodeId, step.action);
-                });
-            });
-            return;
         }
-        const ref = preferredMode === 'system' ? systemViewRef.current : reactFlowRef.current;
-        ref?.focusNode(step.targetNodeId, step.action);
+
+        // Cancel any prior in-flight retry loop so a fast step change can't
+        // leave two loops competing for the same view.
+        if (focusRetryRef.current !== null) {
+            window.clearTimeout(focusRetryRef.current);
+            focusRetryRef.current = null;
+        }
+
+        const startedAt = performance.now();
+        const tryFocus = () => {
+            focusRetryRef.current = null;
+            // Bail out if the user moved on to a different step (or stopped)
+            // in the meantime — the next step will start its own loop.
+            const ref = preferredMode === 'system'
+                ? systemViewRef.current
+                : reactFlowRef.current;
+            const ok = ref?.focusNode(step.targetNodeId, step.action) ?? false;
+            if (ok) return;
+            // Retry for up to ~3 s — enough for ELK layout to finish even on
+            // larger graphs while still feeling instant when the view is
+            // already warm.
+            if (performance.now() - startedAt > 3000) return;
+            focusRetryRef.current = window.setTimeout(tryFocus, 50);
+        };
+        // Defer the first attempt one frame so React commits the view-mode
+        // change before we ask the new view for an imperative focus.
+        requestAnimationFrame(() => requestAnimationFrame(tryFocus));
     }, []);
+
+    // Cancel any pending focus retry on unmount so we don't poke a torn-down view.
+    useEffect(
+        () => () => {
+            if (focusRetryRef.current !== null) {
+                window.clearTimeout(focusRetryRef.current);
+                focusRetryRef.current = null;
+            }
+        },
+        [],
+    );
 
     const storyPlayer = useStoryPlayer(focusNarratedNode);
 
@@ -310,6 +345,8 @@ export function App() {
                                             const audio = await synthesizeKokoroAudio(
                                                 step.narration,
                                                 voiceId,
+                                                undefined,
+                                                'narrator',
                                             );
                                             if (audio) {
                                                 await updateNarratorStepVoice(narratorId, i, audio);
