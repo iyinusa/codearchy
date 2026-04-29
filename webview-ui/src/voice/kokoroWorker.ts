@@ -14,8 +14,9 @@
  *   speak  → { type:'speak', id:number, text:string, voice?:string }
  *   chunk  ← { type:'chunk', id:number, pcm:Float32Array, sampleRate:number }
  *   end    ← { type:'end', id:number }
- *   generate  → { type:'generate', id:number, text:string, voice?:string }
- *   generated ← { type:'generated', id:number, pcm:Float32Array, sampleRate:number }
+ *   generate         → { type:'generate', id:number, text:string, voice?:string }
+ *   generateProgress ← { type:'generateProgress', id:number, done:number, total:number }
+ *   generated        ← { type:'generated', id:number, pcm:Float32Array, sampleRate:number }
  *   stop   → { type:'stop' }
  *   error  ← { type:'error', id?:number, message:string }
  *
@@ -163,20 +164,95 @@ async function synthesise(id: number, text: string, voice: string): Promise<void
     }
 }
 
-/** Single-shot synthesis used by the cache pre-synth pass. Runs the whole
- *  text through tts.generate() and returns one Float32Array PCM buffer.
- *  Does not stream — callers receive the result via the 'generated' event. */
-async function generateOnce(text: string, voice: string): Promise<{ pcm: Float32Array; sampleRate: number }> {
+/** Chunked single-shot synthesis used by the cache pre-synth pass.
+ *  Splits the text into sentence-sized pieces (Kokoro has a ~512 token
+ *  per-call limit) and runs each through `tts.generate()`, concatenating
+ *  the resulting PCM into one continuous buffer. Posts a
+ *  `generateProgress` event after each piece so the UI can render a
+ *  ring-progress indicator around the play button. The final
+ *  concatenated buffer is delivered via the `generated` event.
+ *
+ *  Stays on the same worker thread as `speak` — kokoro-js serialises
+ *  generation calls internally, so streaming and caching coexist
+ *  cleanly without contention. */
+async function generateOnce(
+    id: number,
+    text: string,
+    voice: string,
+): Promise<{ pcm: Float32Array; sampleRate: number }> {
     if (!tts) throw new Error('TTS not initialised');
     if (!warmedVoices.has(voice)) {
         const inflight = inflightWarm.get(voice);
         if (inflight) await inflight;
         else await warmVoice(voice);
     }
+    const pieces = splitTextForSynthesis(text);
+    const total = pieces.length;
     type GenOpts = NonNullable<Parameters<KokoroTTS['generate']>[1]>;
-    const audio = await tts.generate(text, { voice } as unknown as GenOpts);
-    const pcm = new Float32Array(audio.audio as Float32Array);
-    return { pcm, sampleRate: audio.sampling_rate };
+    const buffers: Float32Array[] = [];
+    let sampleRate = 24000;
+    // Progress 0/total so UI can show the ring immediately at 0 %.
+    post({ type: 'generateProgress', id, done: 0, total });
+    for (let i = 0; i < total; i++) {
+        const piece = pieces[i];
+        const audio = await tts.generate(piece, { voice } as unknown as GenOpts);
+        const pcm = new Float32Array(audio.audio as Float32Array);
+        sampleRate = audio.sampling_rate;
+        buffers.push(pcm);
+        post({ type: 'generateProgress', id, done: i + 1, total });
+    }
+    // Concatenate all chunk PCM into a single continuous Float32Array.
+    let totalLen = 0;
+    for (const b of buffers) totalLen += b.length;
+    const out = new Float32Array(totalLen);
+    let offset = 0;
+    for (const b of buffers) {
+        out.set(b, offset);
+        offset += b.length;
+    }
+    return { pcm: out, sampleRate };
+}
+
+/** Split text into Kokoro-friendly chunks. Targets sentence boundaries
+ *  first; falls back to length-based slicing for runaway sentences so
+ *  no single piece blows past the model's input limit. */
+function splitTextForSynthesis(text: string): string[] {
+    const trimmed = text.trim();
+    if (!trimmed) return [];
+    const MAX = 240; // safe under Kokoro's ~512 token cap
+    // First pass: sentence split on terminal punctuation, keeping the
+    // delimiter so prosody stays natural.
+    const sentences = trimmed
+        .split(/(?<=[.!?])\s+(?=[A-Z0-9"'(\[])/g)
+        .map(s => s.trim())
+        .filter(Boolean);
+    const out: string[] = [];
+    for (const s of sentences) {
+        if (s.length <= MAX) {
+            out.push(s);
+            continue;
+        }
+        // Long sentence — break on commas / semicolons, then hard slice
+        // anything still too big. Preserves word boundaries.
+        const sub = s.split(/(?<=[,;:])\s+/g);
+        let buffer = '';
+        for (const piece of sub) {
+            if ((buffer + ' ' + piece).trim().length > MAX) {
+                if (buffer) out.push(buffer.trim());
+                buffer = piece;
+            } else {
+                buffer = buffer ? buffer + ' ' + piece : piece;
+            }
+        }
+        if (buffer) out.push(buffer.trim());
+    }
+    // Final guard: hard-slice any monster pieces (e.g. URLs, no spaces).
+    const safe: string[] = [];
+    for (const p of out) {
+        if (p.length <= MAX) safe.push(p);
+        else for (let i = 0; i < p.length; i += MAX) safe.push(p.slice(i, i + MAX));
+    }
+    return safe.length ? safe : [trimmed];
 }
 
 self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
@@ -192,12 +268,11 @@ self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
             await synthesise(msg.id, msg.text, msg.voice ?? 'af_alloy');
             post({ type: 'end', id: msg.id });
         } else if (msg.type === 'generate') {
-            // Background, non-streaming synthesis. Used by the cache layer:
-            // produces one PCM buffer for the whole text and posts it back
-            // in a single 'generated' message. Does not interact with the
-            // streaming `speak` lane — both can run concurrently from the
-            // worker's perspective (kokoro-js serialises internally).
-            const result = await generateOnce(msg.text, msg.voice ?? 'af_alloy');
+            // Background synthesis used by the chat/narrator caches.
+            // Internally chunks long text and concatenates PCM so the
+            // resulting audio plays back as a single fluid clip; emits
+            // progress events so the UI can render readiness state.
+            const result = await generateOnce(msg.id, msg.text, msg.voice ?? 'af_alloy');
             post(
                 { type: 'generated', id: msg.id, pcm: result.pcm, sampleRate: result.sampleRate },
                 [result.pcm.buffer],

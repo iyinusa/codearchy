@@ -51,6 +51,16 @@ export function App() {
     /** True while the TTS engine is synthesising audio but no sound has
      *  started playing yet. Drives the top-right "voice processing" overlay. */
     const [voiceSynthesizing, setVoiceSynthesizing] = useState(false);
+    /** True between sending a generateNarrator request and receiving the
+     *  generated payload. Drives the shimmer placeholder at the top of the
+     *  narrations list so the user sees instant feedback. */
+    const [narratorGenerating, setNarratorGenerating] = useState(false);
+    /** Per-narrator voice-cache build progress (done/total chunks). Surfaces
+     *  as a ring-progress around each narrator's play button. Entries are
+     *  removed once the cache build completes. */
+    const [narratorSynthProgress, setNarratorSynthProgress] = useState<
+        Record<number, { done: number; total: number }>
+    >({});
     const mainContentRef = useRef<HTMLDivElement>(null);
     const cytoscapeRef = useRef<CytoscapeViewHandle>(null);
     const reactFlowRef = useRef<ReactFlowViewHandle>(null);
@@ -255,6 +265,9 @@ export function App() {
                 }
                 case 'narratorGenerated': {
                     const payload = message.payload as NarratorPayload;
+                    // Always clear the "generating" shimmer once a payload
+                    // arrives, even if it turns out to be invalid below.
+                    setNarratorGenerating(false);
                     if (!payload || !Array.isArray(payload.steps) || payload.steps.length === 0) {
                         break;
                     }
@@ -277,8 +290,19 @@ export function App() {
                             // without 5-15 s synth gaps. Sequential to avoid
                             // saturating the worker; per-step failures are
                             // swallowed so one bad step doesn't kill the rest.
+                            //
+                            // Progress is tracked at step granularity so the
+                            // sidebar can render a ring around the play btn
+                            // and switch to "ready" the moment all steps are
+                            // synthesised. We seed `done:0,total:n` upfront
+                            // so the ring appears immediately at 0 %.
                             if (isKokoroActive() && payload.steps.length) {
                                 const voiceId = getActiveKokoroVoiceId();
+                                const total = payload.steps.length;
+                                setNarratorSynthProgress(prev => ({
+                                    ...prev,
+                                    [narratorId]: { done: 0, total },
+                                }));
                                 void (async () => {
                                     for (let i = 0; i < payload.steps.length; i++) {
                                         const step = payload.steps[i];
@@ -293,7 +317,28 @@ export function App() {
                                         } catch (e) {
                                             console.warn('[CodeArchy] narrator pre-synth failed at step', i, e);
                                         }
+                                        // Bump per-step progress regardless
+                                        // of success so the ring always
+                                        // completes even when individual
+                                        // chunks fail.
+                                        setNarratorSynthProgress(prev => {
+                                            const cur = prev[narratorId];
+                                            if (!cur) return prev;
+                                            return {
+                                                ...prev,
+                                                [narratorId]: { done: i + 1, total: cur.total },
+                                            };
+                                        });
                                     }
+                                    // Drop the entry — the absence of an
+                                    // entry is the "ready" signal for the
+                                    // sidebar.
+                                    setNarratorSynthProgress(prev => {
+                                        if (!(narratorId in prev)) return prev;
+                                        const next = { ...prev };
+                                        delete next[narratorId];
+                                        return next;
+                                    });
                                 })();
                             }
                         } catch (e) {
@@ -434,6 +479,8 @@ export function App() {
                 onNarratorPrev={storyPlayer.prev}
                 onNarratorGoto={storyPlayer.gotoStep}
                 onNarratorsChanged={handleNarratorsChanged}
+                narratorGenerating={narratorGenerating}
+                narratorSynthProgress={narratorSynthProgress}
             />
             <div className="main-content" ref={mainContentRef}>
                 <Toolbar
@@ -521,7 +568,11 @@ export function App() {
             </div>
 
             {/* Chat Panel */}
-            <ChatPanel isOpen={chatOpen} onToggle={() => setChatOpen(v => !v)} />
+            <ChatPanel
+                isOpen={chatOpen}
+                onToggle={() => setChatOpen(v => !v)}
+                onNarratorGenerationStart={() => setNarratorGenerating(true)}
+            />
 
             {/* Model Selector Modal */}
             {showModelSelector && (

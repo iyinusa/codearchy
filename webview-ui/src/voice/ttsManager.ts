@@ -298,6 +298,7 @@ export async function speak(text: string, opts: SpeakOpts = {}): Promise<void> {
 export async function synthesizeKokoroAudio(
     text: string,
     voiceId?: string,
+    onProgress?: (done: number, total: number) => void,
 ): Promise<KokoroAudio | null> {
     const clean = cleanText(text);
     if (!clean) return null;
@@ -306,7 +307,7 @@ export async function synthesizeKokoroAudio(
     }
     const target = voiceId ?? getVoiceConfig().voiceId ?? DEFAULT_KOKORO_VOICE;
     try {
-        return await kokoroGenerate(clean, target);
+        return await kokoroGenerate(clean, target, onProgress);
     } catch (err) {
         console.warn('[CodeArchy] kokoroGenerate failed:', err);
         return null;

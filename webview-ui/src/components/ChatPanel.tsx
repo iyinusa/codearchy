@@ -25,9 +25,13 @@ import {
 interface ChatPanelProps {
     isOpen: boolean;
     onToggle: () => void;
+    /** Called the moment a `generateNarrator` request leaves the panel
+     *  so the host can show a shimmer placeholder in the narrations
+     *  list while the AI is still building the timeline. */
+    onNarratorGenerationStart?: () => void;
 }
 
-export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
+export function ChatPanel({ isOpen, onToggle, onNarratorGenerationStart }: ChatPanelProps) {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
     const [isStreaming, setIsStreaming] = useState(false);
@@ -38,6 +42,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    /** Voice-cache build progress for assistant messages, keyed by
+     *  message id. Surfaces as a ring around the speak button so the
+     *  user can see when audio is ready to play. Removed once the
+     *  cache is written; absence == ready. */
+    const [voiceProgress, setVoiceProgress] = useState<
+        Record<number, { done: number; total: number }>
+    >({});
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -169,11 +180,25 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             return;
         }
         // Cache miss / mismatch: re-synthesise with the active voice and
-        // persist back so future plays are instant. We deliberately do NOT
-        // surface a loading state — the chat row already shows the speaker
-        // icon, which the user will associate with "voice is working".
+        // persist back so future plays are instant. While the synth runs
+        // we publish per-chunk progress to `voiceProgress` so the speak
+        // button shows a ring filling up to ready — gives the user visual
+        // feedback that audio is being prepared.
         (async () => {
-            const audio = await synthesizeKokoroAudio(msg.content, activeVoice);
+            const msgId = msg.id;
+            const onProgress = msgId !== undefined
+                ? (done: number, total: number) =>
+                    setVoiceProgress(p => ({ ...p, [msgId]: { done, total } }))
+                : undefined;
+            const audio = await synthesizeKokoroAudio(msg.content, activeVoice, onProgress);
+            if (msgId !== undefined) {
+                setVoiceProgress(p => {
+                    if (!(msgId in p)) return p;
+                    const next = { ...p };
+                    delete next[msgId];
+                    return next;
+                });
+            }
             if (!audio) {
                 // Kokoro failed → fall back to streaming engine so the user
                 // still hears the answer.
@@ -189,13 +214,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 audio.pcm.byteOffset,
                 audio.pcm.byteOffset + audio.pcm.byteLength,
             ) as ArrayBuffer;
-            if (msg.id !== undefined) {
-                updateConversationMessageVoice(msg.id, audio).catch(e =>
+            if (msgId !== undefined) {
+                updateConversationMessageVoice(msgId, audio).catch(e =>
                     console.error('[CodeArchy] persist message voice failed', e),
                 );
             }
             setMessages(cur => cur.map(m =>
-                m.id !== undefined && m.id === msg.id
+                m.id !== undefined && m.id === msgId
                     ? { ...m, voice: buffer, voiceId: audio.voiceId, voiceSampleRate: audio.sampleRate }
                     : m,
             ));
@@ -308,10 +333,30 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                 // in parallel with the user reading the text.
                                 if (kokoroPath) {
                                     const voiceId = getActiveKokoroVoiceId();
+                                    // Track per-chunk synth progress so the
+                                    // assistant row can render a ring around
+                                    // its speak button while audio is being
+                                    // prepared in the background.
+                                    const onProgress = messageId !== undefined
+                                        ? (done: number, total: number) =>
+                                            setVoiceProgress(p => ({
+                                                ...p,
+                                                [messageId as number]: { done, total },
+                                            }))
+                                        : undefined;
                                     const audio = await synthesizeKokoroAudio(
                                         finalized.content,
                                         voiceId,
+                                        onProgress,
                                     );
+                                    if (messageId !== undefined) {
+                                        setVoiceProgress(p => {
+                                            if (!(messageId in p)) return p;
+                                            const next = { ...p };
+                                            delete next[messageId as number];
+                                            return next;
+                                        });
+                                    }
                                     if (audio) {
                                         const buffer = audio.pcm.buffer.slice(
                                             audio.pcm.byteOffset,
@@ -366,6 +411,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                             if (m.role === 'user') { lastUser = m.content; break; }
                         }
                         if (lastUser && response.content) {
+                            // Notify host so the narrator list shows a
+                            // shimmer placeholder while the AI builds the
+                            // timeline — gives the user instant feedback.
+                            onNarratorGenerationStart?.();
                             postMessage('generateNarrator', {
                                 question: lastUser,
                                 answer: response.content,
@@ -658,15 +707,33 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                 {msg.isStreaming && <span className="chat-cursor">▊</span>}
                             </div>
                             <div className="chat-message-actions">
-                                {msg.role === 'assistant' && !msg.isStreaming && (
-                                    <button
-                                        className="chat-speak-btn"
-                                        onClick={() => speakText(msg)}
-                                        title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
-                                    >
-                                        <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />
-                                    </button>
-                                )}
+                                {msg.role === 'assistant' && !msg.isStreaming && (() => {
+                                    const prog = msg.id !== undefined ? voiceProgress[msg.id] : undefined;
+                                    const pct = prog && prog.total > 0
+                                        ? Math.round((prog.done / prog.total) * 100)
+                                        : 0;
+                                    const isPreparing = !!prog;
+                                    return (
+                                        <button
+                                            className={`chat-speak-btn${isPreparing ? ' preparing' : ''}`}
+                                            onClick={() => speakText(msg)}
+                                            title={
+                                                isPreparing
+                                                    ? `Preparing voice… ${pct}%`
+                                                    : isSpeaking
+                                                        ? 'Stop speaking'
+                                                        : 'Read aloud'
+                                            }
+                                            style={isPreparing
+                                                ? ({ ['--voice-progress' as string]: `${pct}%` } as React.CSSProperties)
+                                                : undefined}
+                                            disabled={isPreparing}
+                                        >
+                                            <span className="chat-speak-ring" aria-hidden="true" />
+                                            <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />
+                                        </button>
+                                    );
+                                })()}
                                 {!msg.isStreaming && (
                                     <button
                                         className="chat-delete-btn"

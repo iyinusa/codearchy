@@ -2521,3 +2521,100 @@ body {
         transform: translateY(0);
     }
 }
+
+/* ======================================================================
+   NARRATOR SHIMMER PLACEHOLDER
+   Shown at the top of the narrations list while the AI is still
+   generating the timeline. Pure CSS — no JS animation cost.
+   ====================================================================== */
+@keyframes codearchy-shimmer {
+    0% {
+        background-position: -200% 0;
+    }
+
+    100% {
+        background-position: 200% 0;
+    }
+}
+
+.narrator-item-shimmer {
+    pointer-events: none;
+    opacity: 0.85;
+}
+
+.narrator-item-shimmer .shimmer-circle {
+    background: linear-gradient(90deg,
+            var(--input-bg) 0%,
+            var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.08)) 50%,
+            var(--input-bg) 100%);
+    background-size: 200% 100%;
+    animation: codearchy-shimmer 1.4s ease-in-out infinite;
+    border-radius: 50%;
+    cursor: default;
+    box-shadow: none;
+}
+
+.shimmer-line {
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(90deg,
+            var(--input-bg) 0%,
+            var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.08)) 50%,
+            var(--input-bg) 100%);
+    background-size: 200% 100%;
+    animation: codearchy-shimmer 1.4s ease-in-out infinite;
+}
+
+.shimmer-line-title {
+    width: 78%;
+    margin-bottom: 5px;
+}
+
+.shimmer-line-meta {
+    width: 38%;
+    height: 6px;
+}
+
+/* ======================================================================
+   CIRCULAR PROGRESS RING
+   Used around the narrator play button and the chat speak button while
+   Kokoro is preparing audio in the background. Driven by a
+   `--voice-progress` CSS variable (string like "47%").
+   ====================================================================== */
+.narrator-play-btn,
+.chat-speak-btn {
+    position: relative;
+    isolation: isolate;
+}
+
+.narrator-play-ring,
+.chat-speak-ring {
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    /* Conic gradient draws the filled arc; mask carves out the inner
+       disc so only a 2 px ring is visible. */
+    background: conic-gradient(var(--accent) 0,
+            var(--accent) var(--voice-progress, 0%),
+            rgba(255, 255, 255, 0.18) var(--voice-progress, 0%),
+            rgba(255, 255, 255, 0.18) 100%);
+    -webkit-mask: radial-gradient(circle, transparent calc(50% - 2px), #000 calc(50% - 2px));
+    mask: radial-gradient(circle, transparent calc(50% - 2px), #000 calc(50% - 2px));
+}
+
+.narrator-play-btn.preparing .narrator-play-ring,
+.chat-speak-btn.preparing .chat-speak-ring {
+    opacity: 1;
+}
+
+.narrator-play-btn.preparing,
+.chat-speak-btn.preparing {
+    cursor: progress;
+}
+
+.narrator-play-btn.preparing:hover {
+    transform: none;
+}

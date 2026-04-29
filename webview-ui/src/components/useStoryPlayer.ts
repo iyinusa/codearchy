@@ -203,10 +203,22 @@ export function useStoryPlayer(
         autoSpeakRef.current = options?.autoSpeak !== false;
         statusRef.current = 'playing';
         setState({ narratorId, stepIndex: 0, status: 'playing' });
-        // Defer the first step by one animation frame so React has flushed the
-        // 'playing' state and the graph viewport is settled before focusNode is
-        // called — without this the first step's zoom/highlight is swallowed.
-        requestAnimationFrame(() => runStep(0));
+        // Defer the first step until React has flushed the 'playing' state
+        // AND the graph view (which may also be switching modes via App's
+        // focusNarratedNode) has mounted/settled. A single rAF was racy —
+        // sometimes the view ref hadn't attached yet, so the first node
+        // pulse + zoom was swallowed. Two rAFs + a small timeout reliably
+        // lands after layout & view-mode propagation, while still feeling
+        // instant to the user.
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                window.setTimeout(() => {
+                    if (statusRef.current === 'playing' && stepIndexRef.current === 0) {
+                        runStep(0);
+                    }
+                }, 30);
+            });
+        });
     }, [runStep]);
 
     const resume = useCallback(() => {

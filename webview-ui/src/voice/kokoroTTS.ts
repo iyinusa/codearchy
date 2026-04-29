@@ -73,6 +73,7 @@ interface PendingGen {
     resolve: (audio: KokoroAudio) => void;
     reject: (err: unknown) => void;
     voice: string;
+    onProgress?: (done: number, total: number) => void;
 }
 const pendingGen = new Map<number, PendingGen>();
 
@@ -122,6 +123,7 @@ type WorkerOut =
     | { type: 'chunk'; id: number; pcm: Float32Array; sampleRate: number }
     | { type: 'end'; id: number }
     | { type: 'generated'; id: number; pcm: Float32Array; sampleRate: number }
+    | { type: 'generateProgress'; id: number; done: number; total: number }
     | { type: 'error'; id?: number; message: string };
 
 function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
@@ -161,6 +163,13 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
         if (!pending) return;
         pendingGen.delete(msg.id);
         pending.resolve({ pcm: msg.pcm, sampleRate: msg.sampleRate, voiceId: pending.voice });
+        return;
+    }
+
+    if (msg.type === 'generateProgress') {
+        const pending = pendingGen.get(msg.id);
+        if (!pending || !pending.onProgress) return;
+        try { pending.onProgress(msg.done, msg.total); } catch { /* ignore */ }
         return;
     }
 
@@ -402,13 +411,17 @@ export interface KokoroAudio {
  * Does NOT play the audio. The caller is responsible for storing it
  * and passing it to `playKokoroPcm()` when the user wants to hear it.
  */
-export function kokoroGenerate(text: string, voice?: string): Promise<KokoroAudio> {
+export function kokoroGenerate(
+    text: string,
+    voice?: string,
+    onProgress?: (done: number, total: number) => void,
+): Promise<KokoroAudio> {
     if (!ready || !worker) return Promise.reject(new Error('Kokoro not ready'));
     const w = worker;
     const id = nextId++;
     const v = voice ?? DEFAULT_KOKORO_VOICE;
     return new Promise<KokoroAudio>((resolve, reject) => {
-        pendingGen.set(id, { resolve, reject, voice: v });
+        pendingGen.set(id, { resolve, reject, voice: v, onProgress });
         w.postMessage({ type: 'generate', id, text, voice: v });
     });
 }
