@@ -792,6 +792,12 @@ export class ArchitecturePanel {
       const baseStylesUri = webview.asWebviewUri(
         vscode.Uri.joinPath(this.extensionUri, 'media', 'architecture.css')
       );
+      const sidebarStylesUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar.css')
+      );
+      const chatStylesUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(this.extensionUri, 'media', 'chat.css')
+      );
       const iconUri = webview.asWebviewUri(
         vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
       );
@@ -819,6 +825,8 @@ export class ArchitecturePanel {
   <title>CodeArchy Architecture</title>
   <link rel="stylesheet" href="${cssUri}">
   <link rel="stylesheet" href="${baseStylesUri}">
+  <link rel="stylesheet" href="${sidebarStylesUri}">
+  <link rel="stylesheet" href="${chatStylesUri}">
 </head>
 <body>
   <div id="root"></div>

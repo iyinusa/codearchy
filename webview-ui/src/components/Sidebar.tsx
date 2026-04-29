@@ -360,13 +360,6 @@ export function Sidebar({
                                                     >
                                                         <Icon name="nextStep" />
                                                     </button>
-                                                    <button
-                                                        className="narrator-icon-btn"
-                                                        title="Stop narration"
-                                                        onClick={onNarratorStop}
-                                                    >
-                                                        <Icon name="close" />
-                                                    </button>
                                                     <div className="narrator-progress">
                                                         <div
                                                             className="narrator-progress-fill"
@@ -375,6 +368,13 @@ export function Sidebar({
                                                             }}
                                                         />
                                                     </div>
+                                                    <button
+                                                        className="narrator-icon-btn"
+                                                        title="Stop narration"
+                                                        onClick={onNarratorStop}
+                                                    >
+                                                        <Icon name="close" />
+                                                    </button>
                                                 </div>
                                                 <div className="narrator-steps" ref={stepsContainerRef}>
                                                     {rec.steps.map((step, i) => (
