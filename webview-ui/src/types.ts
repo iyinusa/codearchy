@@ -115,6 +115,12 @@ export interface ChatMessage {
     isStreaming?: boolean;
     /** Dexie auto-increment id once the message is persisted. */
     id?: number;
+    /** Cached Kokoro PCM buffer for this message (assistant only). */
+    voice?: ArrayBuffer;
+    /** Kokoro voice id the cached PCM was synthesised with. */
+    voiceId?: string;
+    /** Sample rate of the cached PCM (Hz). */
+    voiceSampleRate?: number;
 }
 
 // Narrator types (AI-generated story-player timeline)
@@ -125,6 +131,12 @@ export interface NarratorStep {
     narration: string;
     action: NarratorAction;
     durationMs?: number;
+    /** Cached Kokoro PCM for this step's narration. */
+    voice?: ArrayBuffer;
+    /** Kokoro voice id the cached PCM was synthesised with. */
+    voiceId?: string;
+    /** Sample rate of the cached PCM (Hz). */
+    voiceSampleRate?: number;
 }
 
 export interface NarratorPayload {

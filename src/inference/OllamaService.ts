@@ -291,6 +291,81 @@ export class OllamaService {
         return response;
     }
 
+    /**
+     * Distil a verbose chat answer into a compact, ordered list of
+     * architectural flow steps. Used as a pre-processing pass before
+     * `generateNarration()` so important behaviours aren't lost when the
+     * raw answer is later truncated to fit the narration prompt window.
+     *
+     * Returns plain text (one short bullet per line). Returns an empty
+     * string if extraction fails — callers should fall back to the raw
+     * answer in that case.
+     */
+    async extractKeyFlow(
+        input: { question: string; answer: string },
+        modelTag: string,
+        mode: ProcessingMode = 'fast',
+    ): Promise<string> {
+        const base = getProcessingProfile(mode);
+        const profile: ProcessingProfile = {
+            ...base,
+            // Keep this stage tight — narration extraction should never
+            // become the dominant cost. Plenty of headroom for 4-10 short
+            // bullets.
+            numPredict: Math.min(base.numPredict, 350),
+            numCtx: Math.max(base.numCtx, 6144),
+            think: false,
+            temperature: 0.1,
+        };
+
+        const prompt =
+            `You are an architecture analyst. Read the assistant's answer below and extract the\n` +
+            `essential architectural flow as a SHORT ordered list. Strip prose, examples, code,\n` +
+            `and rationale — keep only the steps that describe how the system works.\n` +
+            `\nUser question:\n${input.question.slice(0, 800)}\n` +
+            `\nAssistant answer:\n${input.answer.slice(0, 6000)}\n` +
+            `\nReturn 4–10 plain bullet lines, one per step, in execution order.\n` +
+            `Each bullet must be a single sentence (<= 140 chars), no markdown, no numbering,\n` +
+            `no headings. Output the bullets only — no preamble, no closing remarks.`;
+
+        try {
+            const raw = await this.generate(modelTag, prompt, profile);
+            const cleaned = this.cleanKeyFlow(raw);
+            return cleaned;
+        } catch {
+            return '';
+        }
+    }
+
+    /** Normalise the raw extractKeyFlow response into a tidy bullet list. */
+    private cleanKeyFlow(raw: string): string {
+        let text = raw.trim();
+        // Strip any code fence the model wrapped the bullets in.
+        const fence = text.match(/```(?:\w+)?\s*([\s\S]*?)```/);
+        if (fence) text = fence[1].trim();
+
+        const lines = text
+            .split(/\r?\n/)
+            .map(l => l.trim())
+            .filter(Boolean)
+            // Drop boilerplate prefaces / closings.
+            .filter(l => !/^(here\s+is|here's|sure|okay|the\s+key\s+flow)/i.test(l));
+
+        const bullets: string[] = [];
+        for (const line of lines) {
+            // Strip any leading markdown bullet, dash, or numbering so the
+            // downstream prompt sees consistent "- step" lines.
+            const stripped = line
+                .replace(/^[-*•]\s+/, '')
+                .replace(/^\d+[.)]\s+/, '')
+                .trim();
+            if (!stripped) continue;
+            bullets.push(`- ${stripped.slice(0, 200)}`);
+            if (bullets.length >= 12) break;
+        }
+        return bullets.join('\n');
+    }
+
     /** Produce a narrator timeline from an assistant response, grounded in the
      *  available node ids. Runs silently — the Webview renders the result as
      *  an animated Story Player. Respects the user-selected processing mode

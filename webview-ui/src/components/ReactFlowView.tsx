@@ -403,8 +403,12 @@ function ReactFlowViewInner({
             focusNode(nodeId: string, action: 'focus' | 'highlight' | 'zoom' = 'focus'): boolean {
                 const node = nodesRef.current.find(n => n.id === nodeId);
                 if (!node) return false;
-                const width = (node as { width?: number }).width ?? 200;
-                const height = (node as { height?: number }).height ?? 80;
+                const width = (node as { width?: number }).width ?? 0;
+                const height = (node as { height?: number }).height ?? 0;
+                // ELK layout hasn't measured this node yet — bail so the
+                // caller can retry. Otherwise we'd center on an arbitrary
+                // (0,0) point and the user would see a "missed" zoom.
+                if (!width || !height) return false;
                 const cx = node.position.x + width / 2;
                 const cy = node.position.y + height / 2;
                 const zoom = action === 'zoom' ? 1.5 : action === 'highlight' ? 1.1 : 1.25;

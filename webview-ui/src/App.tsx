@@ -11,9 +11,11 @@ import { Sidebar } from './components/Sidebar';
 import { DetailPanel } from './components/DetailPanel';
 import { Toolbar } from './components/Toolbar';
 import { ModelSelector } from './components/ModelSelector';
+import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
+import { startKokoroEngine, subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId } from './voice/ttsManager';
 import {
     setProjectId,
     getProjectId,
@@ -21,6 +23,7 @@ import {
     loadSystemRecord,
     saveSystemArchitecture,
     createNarrator,
+    updateNarratorStepVoice,
     subscribeNarrators,
     type NarratorRecord,
 } from './db';
@@ -33,6 +36,7 @@ export function App() {
     const [searchTerm, setSearchTerm] = useState('');
     const [showMiniMap, setShowMiniMap] = useState(true);
     const [showModelSelector, setShowModelSelector] = useState(false);
+    const [showVoiceSelector, setShowVoiceSelector] = useState(false);
     const [systemArch, setSystemArch] = useState<SystemArchitecture | null>(null);
     const [isGeneratingArch, setIsGeneratingArch] = useState(false);
     const [archProgress, setArchProgress] = useState<string>('');
@@ -44,6 +48,19 @@ export function App() {
     const [narrators, setNarrators] = useState<NarratorRecord[]>([]);
     const [narrationViewMode, setNarrationViewMode] = useState<ViewMode | null>(null);
     const [narratedNodeId, setNarratedNodeId] = useState<string | null>(null);
+    /** True while the TTS engine is synthesising audio but no sound has
+     *  started playing yet. Drives the top-right "voice processing" overlay. */
+    const [voiceSynthesizing, setVoiceSynthesizing] = useState(false);
+    /** True between sending a generateNarrator request and receiving the
+     *  generated payload. Drives the shimmer placeholder at the top of the
+     *  narrations list so the user sees instant feedback. */
+    const [narratorGenerating, setNarratorGenerating] = useState(false);
+    /** Per-narrator voice-cache build progress (done/total chunks). Surfaces
+     *  as a ring-progress around each narrator's play button. Entries are
+     *  removed once the cache build completes. */
+    const [narratorSynthProgress, setNarratorSynthProgress] = useState<
+        Record<number, { done: number; total: number }>
+    >({});
     const mainContentRef = useRef<HTMLDivElement>(null);
     const cytoscapeRef = useRef<CytoscapeViewHandle>(null);
     const reactFlowRef = useRef<ReactFlowViewHandle>(null);
@@ -61,9 +78,33 @@ export function App() {
         }
     }, [archStream]);
 
+    // Eagerly boot the pre-bundled Kokoro TTS worker so the model is warm
+    // by the time the user triggers their first speak() — no install,
+    // no download, no UI lag during synthesis.
+    useEffect(() => {
+        void startKokoroEngine().catch((err) => {
+            console.warn('[CodeArchy] Kokoro engine failed to start:', err);
+        });
+    }, []);
+
+    // Mirror the TTS "synthesizing" flag into local state so we can render
+    // a top-right processing indicator while the engine prepares audio.
+    useEffect(() => {
+        return subscribeSynthesizing(setVoiceSynthesizing);
+    }, []);
+
     /** Focus a narrated node, switching to the best-fit view automatically so
      *  the target is actually visible. System view is preferred when the id
-     *  matches a subsystem; otherwise fall back to React Flow. */
+     *  matches a subsystem; otherwise fall back to React Flow.
+     *
+     *  Robust against the race between view-mode change and ELK layout —
+     *  `focusNode()` returns false until the node has rendered with a real
+     *  position, so we retry on a short cadence (~50 ms × 60 = up to 3 s)
+     *  until either the focus succeeds or we time out. Without this the
+     *  first step of a story routinely missed its highlight + zoom because
+     *  ReactFlow / SystemView wasn't done laying out yet.
+     */
+    const focusRetryRef = useRef<number | null>(null);
     const focusNarratedNode = useCallback((step: NarratorStep) => {
         setNarratedNodeId(step.targetNodeId);
         const sys = systemArchRef.current;
@@ -72,20 +113,46 @@ export function App() {
         if (viewModeRef.current !== preferredMode) {
             setViewMode(preferredMode);
             setNarrationViewMode(preferredMode);
-            // Defer the imperative focus call until React Flow mounts in the
-            // newly-visible view — a single rAF is enough because both views
-            // render synchronously once their prop changes.
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    const ref = preferredMode === 'system' ? systemViewRef.current : reactFlowRef.current;
-                    ref?.focusNode(step.targetNodeId, step.action);
-                });
-            });
-            return;
         }
-        const ref = preferredMode === 'system' ? systemViewRef.current : reactFlowRef.current;
-        ref?.focusNode(step.targetNodeId, step.action);
+
+        // Cancel any prior in-flight retry loop so a fast step change can't
+        // leave two loops competing for the same view.
+        if (focusRetryRef.current !== null) {
+            window.clearTimeout(focusRetryRef.current);
+            focusRetryRef.current = null;
+        }
+
+        const startedAt = performance.now();
+        const tryFocus = () => {
+            focusRetryRef.current = null;
+            // Bail out if the user moved on to a different step (or stopped)
+            // in the meantime — the next step will start its own loop.
+            const ref = preferredMode === 'system'
+                ? systemViewRef.current
+                : reactFlowRef.current;
+            const ok = ref?.focusNode(step.targetNodeId, step.action) ?? false;
+            if (ok) return;
+            // Retry for up to ~3 s — enough for ELK layout to finish even on
+            // larger graphs while still feeling instant when the view is
+            // already warm.
+            if (performance.now() - startedAt > 3000) return;
+            focusRetryRef.current = window.setTimeout(tryFocus, 50);
+        };
+        // Defer the first attempt one frame so React commits the view-mode
+        // change before we ask the new view for an imperative focus.
+        requestAnimationFrame(() => requestAnimationFrame(tryFocus));
     }, []);
+
+    // Cancel any pending focus retry on unmount so we don't poke a torn-down view.
+    useEffect(
+        () => () => {
+            if (focusRetryRef.current !== null) {
+                window.clearTimeout(focusRetryRef.current);
+                focusRetryRef.current = null;
+            }
+        },
+        [],
+    );
 
     const storyPlayer = useStoryPlayer(focusNarratedNode);
 
@@ -233,6 +300,9 @@ export function App() {
                 }
                 case 'narratorGenerated': {
                     const payload = message.payload as NarratorPayload;
+                    // Always clear the "generating" shimmer once a payload
+                    // arrives, even if it turns out to be invalid below.
+                    setNarratorGenerating(false);
                     if (!payload || !Array.isArray(payload.steps) || payload.steps.length === 0) {
                         break;
                     }
@@ -242,13 +312,72 @@ export function App() {
                     // push the new record into `narrators` state instantly.
                     (async () => {
                         try {
-                            await createNarrator(pid, {
+                            const narratorId = await createNarrator(pid, {
                                 title: payload.title,
                                 question: payload.question,
                                 steps: payload.steps,
                                 preferredView: payload.preferredView,
                                 messageTimestamp: payload.messageTimestamp,
                             });
+                            // Background voice cache: synthesise each step
+                            // with the active Kokoro voice and persist the
+                            // PCM so the narrator timeline plays back fluidly
+                            // without 5-15 s synth gaps. Sequential to avoid
+                            // saturating the worker; per-step failures are
+                            // swallowed so one bad step doesn't kill the rest.
+                            //
+                            // Progress is tracked at step granularity so the
+                            // sidebar can render a ring around the play btn
+                            // and switch to "ready" the moment all steps are
+                            // synthesised. We seed `done:0,total:n` upfront
+                            // so the ring appears immediately at 0 %.
+                            if (isKokoroActive() && payload.steps.length) {
+                                const voiceId = getActiveKokoroVoiceId();
+                                const total = payload.steps.length;
+                                setNarratorSynthProgress(prev => ({
+                                    ...prev,
+                                    [narratorId]: { done: 0, total },
+                                }));
+                                void (async () => {
+                                    for (let i = 0; i < payload.steps.length; i++) {
+                                        const step = payload.steps[i];
+                                        try {
+                                            const audio = await synthesizeKokoroAudio(
+                                                step.narration,
+                                                voiceId,
+                                                undefined,
+                                                'narrator',
+                                            );
+                                            if (audio) {
+                                                await updateNarratorStepVoice(narratorId, i, audio);
+                                            }
+                                        } catch (e) {
+                                            console.warn('[CodeArchy] narrator pre-synth failed at step', i, e);
+                                        }
+                                        // Bump per-step progress regardless
+                                        // of success so the ring always
+                                        // completes even when individual
+                                        // chunks fail.
+                                        setNarratorSynthProgress(prev => {
+                                            const cur = prev[narratorId];
+                                            if (!cur) return prev;
+                                            return {
+                                                ...prev,
+                                                [narratorId]: { done: i + 1, total: cur.total },
+                                            };
+                                        });
+                                    }
+                                    // Drop the entry — the absence of an
+                                    // entry is the "ready" signal for the
+                                    // sidebar.
+                                    setNarratorSynthProgress(prev => {
+                                        if (!(narratorId in prev)) return prev;
+                                        const next = { ...prev };
+                                        delete next[narratorId];
+                                        return next;
+                                    });
+                                })();
+                            }
                         } catch (e) {
                             console.error('[CodeArchy] save narrator failed', e);
                         }
@@ -387,6 +516,8 @@ export function App() {
                 onNarratorPrev={storyPlayer.prev}
                 onNarratorGoto={storyPlayer.gotoStep}
                 onNarratorsChanged={handleNarratorsChanged}
+                narratorGenerating={narratorGenerating}
+                narratorSynthProgress={narratorSynthProgress}
             />
             <div className="main-content" ref={mainContentRef}>
                 <Toolbar
@@ -398,6 +529,7 @@ export function App() {
                     showMiniMap={showMiniMap}
                     onToggleMiniMap={() => setShowMiniMap(v => !v)}
                     onOpenModelSelector={() => setShowModelSelector(true)}
+                    onOpenVoiceSelector={() => setShowVoiceSelector(true)}
                     hasSystemArch={!!systemArch}
                     isGeneratingArch={isGeneratingArch}
                     onGenerateSystemArch={handleGenerateSystemArch}
@@ -473,11 +605,35 @@ export function App() {
             </div>
 
             {/* Chat Panel */}
-            <ChatPanel isOpen={chatOpen} onToggle={() => setChatOpen(v => !v)} />
+            <ChatPanel
+                isOpen={chatOpen}
+                onToggle={() => setChatOpen(v => !v)}
+                onNarratorGenerationStart={() => setNarratorGenerating(true)}
+            />
 
             {/* Model Selector Modal */}
             {showModelSelector && (
                 <ModelSelector onClose={() => setShowModelSelector(false)} />
+            )}
+
+            {/* Voice Selector Modal */}
+            {showVoiceSelector && (
+                <VoiceSelector onClose={() => setShowVoiceSelector(false)} />
+            )}
+
+            {/* Voice synthesis overlay — visible only while the TTS engine is
+                preparing audio but hasn't started playing yet. */}
+            {voiceSynthesizing && (
+                <div
+                    className="tts-synth-overlay"
+                    role="status"
+                    aria-live="polite"
+                    aria-label="Processing voice"
+                    title="Processing voice…"
+                >
+                    <div className="tts-synth-spinner" />
+                    <span className="tts-synth-label">Processing voice…</span>
+                </div>
             )}
         </div>
     );

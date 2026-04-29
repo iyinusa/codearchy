@@ -25,6 +25,12 @@ interface SidebarProps {
     onNarratorPrev: () => void;
     onNarratorGoto: (index: number) => void;
     onNarratorsChanged: () => void;
+    /** True between sending a generateNarrator request and receiving a
+     *  response. Drives a shimmer placeholder at the top of the list. */
+    narratorGenerating?: boolean;
+    /** Per-narrator background voice-cache progress. Surfaces as a ring
+     *  around the play button so the user can tell when audio is ready. */
+    narratorSynthProgress?: Record<number, { done: number; total: number }>;
 }
 
 const PROCESSING_MODES: Array<{ id: ProcessingMode; label: string; hint: string }> = [
@@ -53,6 +59,8 @@ export function Sidebar({
     onNarratorPrev,
     onNarratorGoto,
     onNarratorsChanged,
+    narratorGenerating = false,
+    narratorSynthProgress,
 }: SidebarProps) {
     const [narratorSearch, setNarratorSearch] = useState('');
     const [editingId, setEditingId] = useState<number | null>(null);
@@ -196,7 +204,18 @@ export function Sidebar({
                     </div>
                 )}
                 <div className="narrator-list">
-                    {narrators.length === 0 ? (
+                    {narratorGenerating && (
+                        <div className="narrator-item narrator-item-shimmer" aria-label="Generating narration">
+                            <div className="narrator-item-row">
+                                <div className="narrator-play-btn shimmer-circle" />
+                                <div className="narrator-item-body">
+                                    <div className="shimmer-line shimmer-line-title" />
+                                    <div className="shimmer-line shimmer-line-meta" />
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {narrators.length === 0 && !narratorGenerating ? (
                         <div className="narrator-empty">
                             Ask the AI a question — a visual narration of its answer will appear here.
                         </div>
@@ -208,6 +227,11 @@ export function Sidebar({
                             const isPlaying = isActive && narratorStatus === 'playing';
                             const isPaused = isActive && narratorStatus === 'paused';
                             const isEditing = editingId === rec.id;
+                            const synth = rec.id !== undefined ? narratorSynthProgress?.[rec.id] : undefined;
+                            const synthPct = synth && synth.total > 0
+                                ? Math.min(100, Math.round((synth.done / synth.total) * 100))
+                                : 0;
+                            const isPreparing = !!synth;
                             return (
                                 <div
                                     key={rec.id}
@@ -215,8 +239,19 @@ export function Sidebar({
                                 >
                                     <div className="narrator-item-row">
                                         <button
-                                            className="narrator-play-btn"
-                                            title={isPlaying ? 'Pause narration' : isPaused ? 'Resume narration' : 'Play narration'}
+                                            className={`narrator-play-btn${isPreparing ? ' preparing' : ''}`}
+                                            title={
+                                                isPreparing
+                                                    ? `Preparing voice… ${synthPct}%`
+                                                    : isPlaying
+                                                        ? 'Pause narration'
+                                                        : isPaused
+                                                            ? 'Resume narration'
+                                                            : 'Play narration'
+                                            }
+                                            style={isPreparing
+                                                ? ({ ['--voice-progress' as string]: `${synthPct}%` } as React.CSSProperties)
+                                                : undefined}
                                             onClick={(e) => {
                                                 e.stopPropagation();
                                                 if (isPlaying) onNarratorPause();
@@ -224,6 +259,7 @@ export function Sidebar({
                                                 else onNarratorPlay(rec);
                                             }}
                                         >
+                                            <span className="narrator-play-ring" aria-hidden="true" />
                                             <Icon name={isPlaying ? 'pause' : 'play'} />
                                         </button>
                                         <div className="narrator-item-body">

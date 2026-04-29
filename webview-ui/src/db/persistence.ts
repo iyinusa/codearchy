@@ -244,6 +244,41 @@ export async function deleteConversationMessage(id: number): Promise<void> {
     await db.conversations.delete(id);
 }
 
+export async function getConversationMessage(
+    id: number,
+): Promise<ConversationMessageRecord | undefined> {
+    return db.conversations.get(id);
+}
+
+/** Persist a freshly-synthesised Kokoro PCM clip on a conversation message.
+ *  Stored as raw ArrayBuffer (Float32) so IndexedDB can keep it cheaply. */
+export async function updateConversationMessageVoice(
+    id: number,
+    voice: { pcm: Float32Array; sampleRate: number; voiceId: string },
+): Promise<void> {
+    await db.conversations.update(id, {
+        voice: pcmToArrayBuffer(voice.pcm),
+        voiceId: voice.voiceId,
+        voiceSampleRate: voice.sampleRate,
+    });
+}
+
+/** Convert a stored ArrayBuffer back into a Float32Array view suitable
+ *  for AudioBuffer.copyToChannel — caller MUST clone if the buffer will
+ *  be mutated, but cached playback is read-only so the alias is safe. */
+export function arrayBufferToPcm(buf: ArrayBuffer): Float32Array {
+    return new Float32Array(buf);
+}
+
+function pcmToArrayBuffer(pcm: Float32Array): ArrayBuffer {
+    // Slice to drop any underlying byteOffset and produce a clean,
+    // structured-cloneable ArrayBuffer for IndexedDB. The cast is
+    // required because lib.dom now types `TypedArray.buffer` as
+    // `ArrayBuffer | SharedArrayBuffer`; we always allocate from a
+    // non-shared source so the runtime value is always ArrayBuffer.
+    return pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength) as ArrayBuffer;
+}
+
 export async function clearConversation(projectId: string): Promise<void> {
     await db.conversations.where('projectId').equals(projectId).delete();
 }
@@ -309,6 +344,25 @@ export async function updateNarratorTitle(id: number, title: string): Promise<vo
 
 export async function updateNarratorSteps(id: number, steps: NarratorStepRecord[]): Promise<void> {
     await db.narrators.update(id, { steps, updatedAt: Date.now() });
+}
+
+/** Persist a freshly-synthesised Kokoro PCM clip onto a single narrator
+ *  step. Reads the current row, patches the indexed step in-place, and
+ *  writes back. No-op if the record is gone or the index is out of range. */
+export async function updateNarratorStepVoice(
+    narratorId: number,
+    stepIndex: number,
+    voice: { pcm: Float32Array; sampleRate: number; voiceId: string },
+): Promise<void> {
+    const rec = await db.narrators.get(narratorId);
+    if (!rec || stepIndex < 0 || stepIndex >= rec.steps.length) return;
+    const buffer = pcmToArrayBuffer(voice.pcm);
+    const nextSteps: NarratorStepRecord[] = rec.steps.map((s, i) =>
+        i === stepIndex
+            ? { ...s, voice: buffer, voiceId: voice.voiceId, voiceSampleRate: voice.sampleRate }
+            : s,
+    );
+    await db.narrators.update(narratorId, { steps: nextSteps, updatedAt: Date.now() });
 }
 
 export async function deleteNarrator(id: number): Promise<void> {

@@ -5,18 +5,33 @@ import { Icon } from './Icons';
 import {
     appendConversationMessage,
     updateConversationMessage,
+    updateConversationMessageVoice,
+    arrayBufferToPcm,
     deleteConversationMessage,
     clearConversation,
     loadConversation,
     useProjectId,
 } from '../db';
+import {
+    speak as ttsSpeak,
+    stopSpeaking,
+    subscribeSpeaking,
+    synthesizeKokoroAudio,
+    playCachedAudio,
+    isKokoroActive,
+    getActiveKokoroVoiceId,
+} from '../voice/ttsManager';
 
 interface ChatPanelProps {
     isOpen: boolean;
     onToggle: () => void;
+    /** Called the moment a `generateNarrator` request leaves the panel
+     *  so the host can show a shimmer placeholder in the narrations
+     *  list while the AI is still building the timeline. */
+    onNarratorGenerationStart?: () => void;
 }
 
-export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
+export function ChatPanel({ isOpen, onToggle, onNarratorGenerationStart }: ChatPanelProps) {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
     const [isStreaming, setIsStreaming] = useState(false);
@@ -27,6 +42,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    /** Voice-cache build progress for assistant messages, keyed by
+     *  message id. Surfaces as a ring around the speak button so the
+     *  user can see when audio is ready to play. Removed once the
+     *  cache is written; absence == ready. */
+    const [voiceProgress, setVoiceProgress] = useState<
+        Record<number, { done: number; total: number }>
+    >({});
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -57,6 +79,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     role: r.role,
                     content: r.content,
                     timestamp: r.timestamp,
+                    voice: r.voice,
+                    voiceId: r.voiceId,
+                    voiceSampleRate: r.voiceSampleRate,
                 }));
                 setMessages(hydrated);
                 // Push history to host so the model context window matches
@@ -121,15 +146,94 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
     const speakNow = useCallback((text: string) => {
         if (!text.trim()) return;
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 1;
-        utterance.pitch = 1;
-        utterance.onend = () => setIsSpeaking(false);
-        utterance.onerror = () => setIsSpeaking(false);
-        setIsSpeaking(true);
-        window.speechSynthesis.speak(utterance);
+        // Delegate to the unified TTS manager. It picks the right engine
+        // (Web Speech or lazy-loaded Kokoro) based on the user's voice
+        // configuration. The `subscribeSpeaking` hook below keeps the
+        // speaker icon state in sync regardless of which engine ran.
+        void ttsSpeak(text, {
+            onError: () => setIsSpeaking(false),
+        });
     }, []);
+
+    /**
+     * Cache-aware playback for an assistant message.
+     *  - Kokoro engine + matching cached PCM → instant playback (no overlay).
+     *  - Kokoro engine + stale-or-missing PCM → synthesise via the cache,
+     *    persist, update React state, then play. While synthesising the
+     *    `synthesizeKokoroAudio` helper does NOT toggle the synthesizing
+     *    overlay — feels like a normal TTS even though it took seconds.
+     *  - Web Speech engine → unchanged streaming path via ttsSpeak.
+     */
+    const speakMessage = useCallback((msg: ChatMessage) => {
+        if (!msg.content.trim()) return;
+        const activeVoice = getActiveKokoroVoiceId();
+        if (!isKokoroActive()) {
+            speakNow(msg.content);
+            return;
+        }
+        // Cache hit: voice id matches → play raw PCM immediately.
+        if (msg.voice && msg.voiceSampleRate && msg.voiceId === activeVoice) {
+            const pcm = arrayBufferToPcm(msg.voice);
+            void playCachedAudio(pcm, msg.voiceSampleRate, {
+                onError: () => setIsSpeaking(false),
+            });
+            return;
+        }
+        // Cache miss / mismatch: re-synthesise with the active voice and
+        // persist back so future plays are instant. While the synth runs
+        // we publish per-chunk progress to `voiceProgress` so the speak
+        // button shows a ring filling up to ready — gives the user visual
+        // feedback that audio is being prepared.
+        (async () => {
+            const msgId = msg.id;
+            const onProgress = msgId !== undefined
+                ? (done: number, total: number) =>
+                    setVoiceProgress(p => ({ ...p, [msgId]: { done, total } }))
+                : undefined;
+            const audio = await synthesizeKokoroAudio(msg.content, activeVoice, onProgress);
+            if (msgId !== undefined) {
+                setVoiceProgress(p => {
+                    if (!(msgId in p)) return p;
+                    const next = { ...p };
+                    delete next[msgId];
+                    return next;
+                });
+            }
+            if (!audio) {
+                // Kokoro failed → fall back to streaming engine so the user
+                // still hears the answer.
+                speakNow(msg.content);
+                return;
+            }
+            // Patch the cache for this message so subsequent clicks are
+            // instant. Both DB and in-memory state get the new buffer.
+            // Cast required: lib.dom now types `TypedArray.buffer` as
+            // `ArrayBuffer | SharedArrayBuffer`; our PCM is always backed
+            // by a non-shared ArrayBuffer at runtime.
+            const buffer = audio.pcm.buffer.slice(
+                audio.pcm.byteOffset,
+                audio.pcm.byteOffset + audio.pcm.byteLength,
+            ) as ArrayBuffer;
+            if (msgId !== undefined) {
+                updateConversationMessageVoice(msgId, audio).catch(e =>
+                    console.error('[CodeArchy] persist message voice failed', e),
+                );
+            }
+            setMessages(cur => cur.map(m =>
+                m.id !== undefined && m.id === msgId
+                    ? { ...m, voice: buffer, voiceId: audio.voiceId, voiceSampleRate: audio.sampleRate }
+                    : m,
+            ));
+            void playCachedAudio(audio.pcm, audio.sampleRate, {
+                onError: () => setIsSpeaking(false),
+            });
+        })();
+    }, [speakNow]);
+
+    // Mirror the TTS manager's speaking state into local UI state so the
+    // speaker / stop icon swaps correctly even when Kokoro audio playback
+    // ends asynchronously.
+    useEffect(() => subscribeSpeaking(setIsSpeaking), []);
 
     // Listen for chat responses
     useEffect(() => {
@@ -170,6 +274,12 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         setIsStreaming(false);
                         return;
                     }
+                    // Snapshot auto-speak intent now — when Kokoro is the
+                    // active engine we route playback through the cache
+                    // pre-synth task instead of the streaming speakNow().
+                    const wantsAutoSpeak = autoSpeakOnNextReplyRef.current;
+                    autoSpeakOnNextReplyRef.current = false;
+                    const kokoroPath = isKokoroActive();
                     // Finalize the streaming assistant message (or append a
                     // new one if nothing streamed) and persist it to the DB.
                     const pid = projectIdRef.current;
@@ -192,6 +302,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                         }
                         if (pid) {
                             (async () => {
+                                let messageId: number | undefined = finalized.id;
                                 try {
                                     if (finalized.id !== undefined) {
                                         await updateConversationMessage(finalized.id, {
@@ -203,6 +314,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                             content: finalized.content,
                                             timestamp: finalized.timestamp,
                                         });
+                                        messageId = id;
                                         // Patch the id back into state once persisted.
                                         setMessages(cur => cur.map(m =>
                                             m === finalized || (m.timestamp === finalized.timestamp && m.role === finalized.role && m.id === undefined)
@@ -213,13 +325,76 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                 } catch (e) {
                                     console.error('[CodeArchy] persist assistant failed', e);
                                 }
+                                // Background voice cache: synthesise the
+                                // assistant reply and store the PCM so any
+                                // future playback (or the auto-speak path
+                                // below) is instant. Streaming output stays
+                                // untouched — the cache job runs silently
+                                // in parallel with the user reading the text.
+                                if (kokoroPath) {
+                                    const voiceId = getActiveKokoroVoiceId();
+                                    // Track per-chunk synth progress so the
+                                    // assistant row can render a ring around
+                                    // its speak button while audio is being
+                                    // prepared in the background.
+                                    const onProgress = messageId !== undefined
+                                        ? (done: number, total: number) =>
+                                            setVoiceProgress(p => ({
+                                                ...p,
+                                                [messageId as number]: { done, total },
+                                            }))
+                                        : undefined;
+                                    const audio = await synthesizeKokoroAudio(
+                                        finalized.content,
+                                        voiceId,
+                                        onProgress,
+                                    );
+                                    if (messageId !== undefined) {
+                                        setVoiceProgress(p => {
+                                            if (!(messageId in p)) return p;
+                                            const next = { ...p };
+                                            delete next[messageId as number];
+                                            return next;
+                                        });
+                                    }
+                                    if (audio) {
+                                        const buffer = audio.pcm.buffer.slice(
+                                            audio.pcm.byteOffset,
+                                            audio.pcm.byteOffset + audio.pcm.byteLength,
+                                        ) as ArrayBuffer;
+                                        if (messageId !== undefined) {
+                                            updateConversationMessageVoice(messageId, audio).catch(e =>
+                                                console.error('[CodeArchy] persist message voice failed', e),
+                                            );
+                                        }
+                                        setMessages(cur => cur.map(m =>
+                                            (messageId !== undefined && m.id === messageId)
+                                                || (m === finalized)
+                                                ? { ...m, voice: buffer, voiceId: audio.voiceId, voiceSampleRate: audio.sampleRate }
+                                                : m,
+                                        ));
+                                        if (wantsAutoSpeak) {
+                                            // Voice-input auto-reply: play
+                                            // the cached PCM the moment it's
+                                            // ready. Feels like classic TTS.
+                                            void playCachedAudio(audio.pcm, audio.sampleRate, {
+                                                onError: () => setIsSpeaking(false),
+                                            });
+                                        }
+                                    } else if (wantsAutoSpeak) {
+                                        // Synthesis failed → fall back so
+                                        // the user still hears the answer.
+                                        speakNow(finalized.content);
+                                    }
+                                }
                             })();
                         }
                         return next;
                     });
                     setIsStreaming(false);
-                    if (autoSpeakOnNextReplyRef.current) {
-                        autoSpeakOnNextReplyRef.current = false;
+                    // Web-Speech path keeps the original streaming behaviour
+                    // — audio starts immediately, no cache involved.
+                    if (wantsAutoSpeak && !kokoroPath) {
                         speakNow(response.content);
                     }
                     // Fire-and-forget narrator generation: ask the host to
@@ -236,6 +411,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                             if (m.role === 'user') { lastUser = m.content; break; }
                         }
                         if (lastUser && response.content) {
+                            // Notify host so the narrator list shows a
+                            // shimmer placeholder while the AI builds the
+                            // timeline — gives the user instant feedback.
+                            onNarratorGenerationStart?.();
                             postMessage('generateNarrator', {
                                 question: lastUser,
                                 answer: response.content,
@@ -432,17 +611,20 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     }, [isRecording]);
 
     // --- Audio: Text-to-Speech ---
+    // Toggle playback for an assistant message. Routes through the
+    // cache-aware `speakMessage` helper so Kokoro plays from IndexedDB
+    // when available and only re-synthesises when the active voice
+    // changed (or no cache exists yet).
     const speakText = useCallback(
-        (text: string) => {
+        (msg: ChatMessage) => {
             if (isSpeaking) {
-                window.speechSynthesis.cancel();
+                stopSpeaking();
                 setIsSpeaking(false);
                 return;
             }
-
-            speakNow(text);
+            speakMessage(msg);
         },
-        [isSpeaking, speakNow]
+        [isSpeaking, speakMessage]
     );
 
     if (!isOpen) {
@@ -525,15 +707,33 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                                 {msg.isStreaming && <span className="chat-cursor">▊</span>}
                             </div>
                             <div className="chat-message-actions">
-                                {msg.role === 'assistant' && !msg.isStreaming && (
-                                    <button
-                                        className="chat-speak-btn"
-                                        onClick={() => speakText(msg.content)}
-                                        title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
-                                    >
-                                        <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />
-                                    </button>
-                                )}
+                                {msg.role === 'assistant' && !msg.isStreaming && (() => {
+                                    const prog = msg.id !== undefined ? voiceProgress[msg.id] : undefined;
+                                    const pct = prog && prog.total > 0
+                                        ? Math.round((prog.done / prog.total) * 100)
+                                        : 0;
+                                    const isPreparing = !!prog;
+                                    return (
+                                        <button
+                                            className={`chat-speak-btn${isPreparing ? ' preparing' : ''}`}
+                                            onClick={() => speakText(msg)}
+                                            title={
+                                                isPreparing
+                                                    ? `Preparing voice… ${pct}%`
+                                                    : isSpeaking
+                                                        ? 'Stop speaking'
+                                                        : 'Read aloud'
+                                            }
+                                            style={isPreparing
+                                                ? ({ ['--voice-progress' as string]: `${pct}%` } as React.CSSProperties)
+                                                : undefined}
+                                            disabled={isPreparing}
+                                        >
+                                            <span className="chat-speak-ring" aria-hidden="true" />
+                                            <Icon name={isSpeaking ? 'stopAction' : 'speakAloud'} />
+                                        </button>
+                                    );
+                                })()}
                                 {!msg.isStreaming && (
                                     <button
                                         className="chat-delete-btn"

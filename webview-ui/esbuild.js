@@ -1,36 +1,79 @@
 const esbuild = require('esbuild');
 const path = require('path');
+const fs = require('fs');
 
 const isWatch = process.argv.includes('--watch');
 
-const buildOptions = {
+/**
+ * Copy the ONNX Runtime Web wasm binary shipped by @huggingface/transformers
+ * into dist/ort/ so ORT can fetch it from the webview's own origin.
+ */
+function copyOrtAssets() {
+    const src = path.join(__dirname, 'node_modules', '@huggingface', 'transformers', 'dist');
+    const dest = path.join(__dirname, 'dist', 'ort');
+    const assets = ['ort-wasm-simd-threaded.jsep.wasm'];
+    if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+    for (const name of assets) {
+        const from = path.join(src, name);
+        const to = path.join(dest, name);
+        if (!fs.existsSync(from)) {
+            console.warn(`[esbuild] ORT asset missing: ${from}`);
+            continue;
+        }
+        fs.copyFileSync(from, to);
+        const size = fs.statSync(to).size;
+        console.log(`[esbuild] Copied ${name} (${(size / 1024 / 1024).toFixed(1)} MB)`);
+    }
+}
+
+// ── Main webview bundle (UI) ────────────────────────────────────────────────
+
+const mainOptions = {
     entryPoints: [path.join(__dirname, 'src', 'index.tsx')],
     bundle: true,
-    outfile: path.join(__dirname, 'dist', 'webview.js'),
-    format: 'iife',
+    format: 'esm',
+    splitting: true,
+    outdir: path.join(__dirname, 'dist'),
+    entryNames: 'webview',
+    chunkNames: 'chunks/[name]-[hash]',
+    assetNames: 'assets/[name]-[hash]',
     platform: 'browser',
     target: 'es2020',
     minify: !isWatch,
     sourcemap: isWatch,
-    loader: {
-        '.tsx': 'tsx',
-        '.ts': 'ts',
-        '.css': 'css',
-    },
-    define: {
-        'process.env.NODE_ENV': isWatch ? '"development"' : '"production"',
-    },
-    // Bundle CSS into JS (injected via style tag)
-    // React Flow CSS is imported inline
+    loader: { '.tsx': 'tsx', '.ts': 'ts', '.css': 'css', '.wasm': 'file' },
+    define: { 'process.env.NODE_ENV': isWatch ? '"development"' : '"production"' },
+    // kokoro-js and transformers live exclusively in the worker bundle.
+    external: ['kokoro-js', '@huggingface/transformers'],
+};
+
+// ── Kokoro inference worker (ML stack runs here, off the UI thread) ─────────
+
+const workerOptions = {
+    entryPoints: [path.join(__dirname, 'src', 'voice', 'kokoroWorker.ts')],
+    bundle: true,
+    // IIFE format avoids type:"module" worker quirks in the VS Code webview.
+    format: 'iife',
+    outfile: path.join(__dirname, 'dist', 'kokoroWorker.js'),
+    platform: 'browser',
+    target: 'es2020',
+    minify: !isWatch,
+    sourcemap: isWatch,
+    loader: { '.ts': 'ts', '.wasm': 'file' },
+    define: { 'process.env.NODE_ENV': isWatch ? '"development"' : '"production"' },
 };
 
 async function build() {
     if (isWatch) {
-        const ctx = await esbuild.context(buildOptions);
-        await ctx.watch();
+        const mainCtx = await esbuild.context(mainOptions);
+        const workerCtx = await esbuild.context(workerOptions);
+        await Promise.all([mainCtx.watch(), workerCtx.watch()]);
+        copyOrtAssets();
         console.log('Watching webview-ui for changes...');
     } else {
-        await esbuild.build(buildOptions);
+        await esbuild.build(mainOptions);
+        await esbuild.build(workerOptions);
+        copyOrtAssets();
         console.log('Webview UI built successfully.');
     }
 }

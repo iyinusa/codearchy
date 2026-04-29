@@ -146,11 +146,12 @@
         }
     },
     "scripts": {
-        "vscode:prepublish": "npm run build:webview && npm run compile",
+        "vscode:prepublish": "npm run download-kokoro && npm run build:webview && npm run compile",
         "build:webview": "cd webview-ui && npm install && npm run build",
         "compile": "tsc -p ./",
         "watch": "tsc -watch -p ./",
         "download-grammars": "node scripts/download-grammars.js",
+        "download-kokoro": "cd webview-ui && npm install && cd .. && node scripts/download-kokoro.js",
         "lint": "eslint src --ext ts",
         "test": "node ./out/test/runTest.js",
         "package": "vsce package",

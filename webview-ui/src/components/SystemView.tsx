@@ -580,8 +580,10 @@ function SystemViewInner({
             focusNode(nodeId: string, action: 'focus' | 'highlight' | 'zoom' = 'focus'): boolean {
                 const node = nodesRef.current.find(n => n.id === nodeId);
                 if (!node) return false;
-                const width = (node as { width?: number }).width ?? 240;
-                const height = (node as { height?: number }).height ?? 140;
+                const width = (node as { width?: number }).width ?? 0;
+                const height = (node as { height?: number }).height ?? 0;
+                // Layout still pending — caller should retry.
+                if (!width || !height) return false;
                 const cx = node.position.x + width / 2;
                 const cy = node.position.y + height / 2;
                 const zoom = action === 'zoom' ? 1.4 : action === 'highlight' ? 1.05 : 1.2;

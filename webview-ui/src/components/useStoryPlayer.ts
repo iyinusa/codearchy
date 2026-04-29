@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NarratorStep } from '../types';
+import {
+    speak as ttsSpeak,
+    stopSpeaking,
+    synthesizeKokoroAudio,
+    playCachedAudio,
+    isKokoroActive,
+    getActiveKokoroVoiceId,
+    notifySynthesizing,
+} from '../voice/ttsManager';
+import { getVoiceConfig } from '../voice/voiceConfig';
+import { isKokoroReady } from '../voice/kokoroTTS';
+import { arrayBufferToPcm, updateNarratorStepVoice } from '../db';
 
 /**
  * useStoryPlayer — drives a narrator timeline silently in memory.
@@ -45,8 +57,8 @@ export function useStoryPlayer(
     const statusRef = useRef<StoryPlayerState['status']>('idle');
     const autoSpeakRef = useRef<boolean>(true);
     const timerRef = useRef<number | null>(null);
-    const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
     const stepIndexRef = useRef<number>(0);
+    const narratorIdRef = useRef<number | null>(null);
     const onStepRef = useRef(onStep);
     onStepRef.current = onStep;
 
@@ -58,16 +70,7 @@ export function useStoryPlayer(
     };
 
     const cancelSpeech = () => {
-        if (utteranceRef.current) {
-            utteranceRef.current.onend = null;
-            utteranceRef.current.onerror = null;
-            utteranceRef.current = null;
-        }
-        try {
-            window.speechSynthesis.cancel();
-        } catch {
-            /* no-op */
-        }
+        stopSpeaking();
     };
 
     const runStep = useCallback((index: number) => {
@@ -98,25 +101,100 @@ export function useStoryPlayer(
             runStep(stepIndexRef.current + 1);
         };
 
-        if (autoSpeakRef.current && 'speechSynthesis' in window) {
-            const u = new SpeechSynthesisUtterance(step.narration);
-            u.rate = 1.02;
-            u.pitch = 1;
-            u.onend = () => {
-                if (utteranceRef.current === u) utteranceRef.current = null;
-                advance();
-            };
-            u.onerror = () => {
-                if (utteranceRef.current === u) utteranceRef.current = null;
-                advance();
-            };
-            utteranceRef.current = u;
-            try {
-                window.speechSynthesis.speak(u);
-            } catch {
-                utteranceRef.current = null;
+        if (autoSpeakRef.current) {
+            // Cache-first: when Kokoro is the active engine and this step
+            // already has a matching cached PCM, play it instantly. Falls
+            // back to on-demand synthesis (and persists the result) if the
+            // cache is empty or was generated for a different voice.
+            const kokoroActive = isKokoroActive();
+            const activeVoice = kokoroActive ? getActiveKokoroVoiceId() : null;
+            const cached =
+                kokoroActive &&
+                    step.voice &&
+                    step.voiceSampleRate &&
+                    step.voiceId === activeVoice
+                    ? { pcm: arrayBufferToPcm(step.voice), sampleRate: step.voiceSampleRate }
+                    : null;
+
+            if (cached) {
+                void playCachedAudio(cached.pcm, cached.sampleRate, {
+                    onEnd: () => advance(),
+                    onError: () => advance(),
+                });
+                // Cached playback is instant — keep the safety timer tight.
+                timerRef.current = window.setTimeout(advance, estMs * 4);
+            } else if (kokoroActive && activeVoice) {
+                // On-demand synth + persist + play. We capture the step
+                // index and narrator id so a slow synth can't cross-pollute
+                // a step the user has since skipped past.
+                const myIndex = index;
+                const myNarratorId = narratorIdRef.current;
+                (async () => {
+                    notifySynthesizing(true);
+                    const audio = await synthesizeKokoroAudio(step.narration, activeVoice, undefined, 'narrator');
+                    notifySynthesizing(false);
+                    if (statusRef.current !== 'playing' || stepIndexRef.current !== myIndex) {
+                        // Player moved on — drop the result; cache write
+                        // would still be nice but the user already paused
+                        // or skipped, so skip the write to avoid stomping
+                        // a fresher in-flight synth at the new index.
+                        return;
+                    }
+                    if (!audio) {
+                        // Synth failed → fall back to streaming so the
+                        // narration is still audible.
+                        void ttsSpeak(step.narration, {
+                            onEnd: () => advance(),
+                            onError: () => advance(),
+                        });
+                        return;
+                    }
+                    // Persist back to the narrator row so subsequent plays
+                    // are instant. Mutate stepsRef in place too — the
+                    // hook's local copy isn't reactive but other steps may
+                    // still reference voice on their own playback.
+                    // Cast: `TypedArray.buffer` is now typed as
+                    // `ArrayBuffer | SharedArrayBuffer`; our PCM is
+                    // always backed by a non-shared ArrayBuffer.
+                    const buffer = audio.pcm.buffer.slice(
+                        audio.pcm.byteOffset,
+                        audio.pcm.byteOffset + audio.pcm.byteLength,
+                    ) as ArrayBuffer;
+                    const liveSteps = stepsRef.current.slice();
+                    if (liveSteps[myIndex]) {
+                        liveSteps[myIndex] = {
+                            ...liveSteps[myIndex],
+                            voice: buffer,
+                            voiceId: audio.voiceId,
+                            voiceSampleRate: audio.sampleRate,
+                        };
+                        stepsRef.current = liveSteps;
+                    }
+                    if (myNarratorId !== null) {
+                        updateNarratorStepVoice(myNarratorId, myIndex, audio).catch(e =>
+                            console.error('[CodeArchy] persist step voice failed', e),
+                        );
+                    }
+                    void playCachedAudio(audio.pcm, audio.sampleRate, {
+                        onEnd: () => advance(),
+                        onError: () => advance(),
+                    });
+                })();
+                // Generous safety: synth can take seconds.
+                const safetyMs = Math.max(30_000, estMs * 3);
+                timerRef.current = window.setTimeout(advance, safetyMs);
+            } else {
+                // Web Speech engine — original streaming path, unchanged.
+                void ttsSpeak(step.narration, {
+                    onEnd: () => advance(),
+                    onError: () => advance(),
+                });
+                const kokoroLegacy = getVoiceConfig().engine === 'kokoro' && isKokoroReady();
+                const safetyMs = kokoroLegacy
+                    ? Math.max(30_000, estMs * 3)
+                    : estMs + 1200;
+                timerRef.current = window.setTimeout(advance, safetyMs);
             }
-            timerRef.current = window.setTimeout(advance, estMs + 1200);
         } else {
             timerRef.current = window.setTimeout(advance, estMs);
         }
@@ -124,13 +202,26 @@ export function useStoryPlayer(
 
     const play = useCallback((narratorId: number, steps: NarratorStep[], options?: { autoSpeak?: boolean }) => {
         stepsRef.current = steps;
+        narratorIdRef.current = narratorId;
         autoSpeakRef.current = options?.autoSpeak !== false;
         statusRef.current = 'playing';
         setState({ narratorId, stepIndex: 0, status: 'playing' });
-        // Defer the first step by one animation frame so React has flushed the
-        // 'playing' state and the graph viewport is settled before focusNode is
-        // called — without this the first step's zoom/highlight is swallowed.
-        requestAnimationFrame(() => runStep(0));
+        // Defer the first step until React has flushed the 'playing' state
+        // AND the graph view (which may also be switching modes via App's
+        // focusNarratedNode) has mounted/settled. A single rAF was racy —
+        // sometimes the view ref hadn't attached yet, so the first node
+        // pulse + zoom was swallowed. Two rAFs + a small timeout reliably
+        // lands after layout & view-mode propagation, while still feeling
+        // instant to the user.
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                window.setTimeout(() => {
+                    if (statusRef.current === 'playing' && stepIndexRef.current === 0) {
+                        runStep(0);
+                    }
+                }, 30);
+            });
+        });
     }, [runStep]);
 
     const resume = useCallback(() => {
@@ -151,6 +242,7 @@ export function useStoryPlayer(
         statusRef.current = 'idle';
         stepsRef.current = [];
         stepIndexRef.current = 0;
+        narratorIdRef.current = null;
         cancelSpeech();
         clearTimer();
         setState({ narratorId: null, stepIndex: 0, status: 'idle' });
