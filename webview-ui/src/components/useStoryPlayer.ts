@@ -7,6 +7,7 @@ import {
     playCachedAudio,
     isKokoroActive,
     getActiveKokoroVoiceId,
+    notifySynthesizing,
 } from '../voice/ttsManager';
 import { getVoiceConfig } from '../voice/voiceConfig';
 import { isKokoroReady } from '../voice/kokoroTTS';
@@ -129,7 +130,9 @@ export function useStoryPlayer(
                 const myIndex = index;
                 const myNarratorId = narratorIdRef.current;
                 (async () => {
+                    notifySynthesizing(true);
                     const audio = await synthesizeKokoroAudio(step.narration, activeVoice, undefined, 'narrator');
+                    notifySynthesizing(false);
                     if (statusRef.current !== 'playing' || stepIndexRef.current !== myIndex) {
                         // Player moved on — drop the result; cache write
                         // would still be nice but the user already paused

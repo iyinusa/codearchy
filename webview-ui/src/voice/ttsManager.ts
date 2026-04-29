@@ -99,6 +99,11 @@ function clearSynthesizingIfCurrent(gen: number): void {
 
 export function isSynthesizing(): boolean { return activeSynthesizing; }
 
+/** Directly set the synthesizing overlay state. Used by callers that invoke
+ *  synthesizeKokoroAudio() during active playback (e.g. story player on-demand
+ *  synth) and need to surface the "Processing voice…" indicator themselves. */
+export function notifySynthesizing(s: boolean): void { setSynthesizing(s); }
+
 export function subscribeSynthesizing(listener: (s: boolean) => void): () => void {
     synthListeners.add(listener);
     listener(activeSynthesizing);
