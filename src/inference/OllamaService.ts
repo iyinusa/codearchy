@@ -207,14 +207,28 @@ export class OllamaService {
     private architectureContext: string = '';
     private systemArchitecture: SystemArchitecture | undefined;
 
-    /** Check if Ollama is running */
+    /** Cache for setArchitectureContext — avoids rebuilding the summary on every chat message. */
+    private _contextGraphRef: ArchitectureGraph | undefined;
+    private _contextMode: ProcessingMode | undefined;
+
+    /** Cache for isAvailable() — avoid a redundant HTTP round-trip on every chat send. */
+    private _availableAt = 0;
+    private _availableResult = false;
+
+    /** Check if Ollama is running — result is cached for 10 s to prevent
+     *  repeated round-trips on every chat message while the model is active. */
     async isAvailable(): Promise<boolean> {
+        if (Date.now() - this._availableAt < 10_000) {
+            return this._availableResult;
+        }
         try {
             await this.httpGet(`${OLLAMA_BASE}/api/tags`);
-            return true;
+            this._availableResult = true;
         } catch {
-            return false;
+            this._availableResult = false;
         }
+        this._availableAt = Date.now();
+        return this._availableResult;
     }
 
     /** List installed models and check which ones are available */
@@ -559,7 +573,34 @@ export class OllamaService {
 
     /** Set the architecture context for chat conversations */
     setArchitectureContext(graph: ArchitectureGraph, mode: ProcessingMode = 'moderate'): void {
+        // Guard: skip the expensive summarizeGraph rebuild if neither the graph
+        // reference nor the processing mode has changed since the last call.
+        if (graph === this._contextGraphRef && mode === this._contextMode) return;
         this.architectureContext = this.summarizeGraph(graph, getProcessingProfile(mode));
+        this._contextGraphRef = graph;
+        this._contextMode = mode;
+    }
+
+    /** Fire-and-forget: pre-load a model so Ollama has it in memory before the
+     *  user sends their first message.  Failures are silently swallowed — this
+     *  is a best-effort optimisation that should never surface to the user. */
+    async warmUp(modelTag: string): Promise<void> {
+        try {
+            const body = JSON.stringify({
+                model: modelTag,
+                prompt: ' ',
+                stream: false,
+                keep_alive: '30m',
+                options: { num_predict: 1 },
+            });
+            await this.httpPost('/api/generate', body, 90_000);
+            // Stamp the availability cache so the next isAvailable() call is
+            // answered instantly — the warmup proved Ollama is running.
+            this._availableResult = true;
+            this._availableAt = Date.now();
+        } catch {
+            // ignore — warm-up is best effort
+        }
     }
 
     /** Store (or clear) the AI-generated system architecture so the chat

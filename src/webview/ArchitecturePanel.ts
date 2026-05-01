@@ -130,6 +130,9 @@ export class ArchitecturePanel {
 
   private sendGraphData(graph: ArchitectureGraph) {
     this.currentGraph = graph;
+    // Pre-build the architecture context cache so the first chat message
+    // doesn't have to do it synchronously on the hot path.
+    this.ollamaService.setArchitectureContext(graph, this.processingMode);
     this.panel.webview.postMessage({
       type: WebviewMessageType.GraphData,
       payload: graph,
@@ -406,6 +409,14 @@ export class ArchitecturePanel {
     // Send updated status
     this.handleModelStatusRequest();
     vscode.window.showInformationMessage(`CodeArchy: AI model set to ${modelId}`);
+
+    // Pre-warm: fire a minimal request to Ollama so the model is loaded into
+    // memory before the user sends their first chat message.  Runs silently
+    // in the background — any failure is swallowed by warmUp() itself.
+    const opt = MODEL_OPTIONS.find(m => m.id === modelId);
+    if (opt) {
+      this.ollamaService.warmUp(opt.ollamaTag).catch(() => { /* ignore */ });
+    }
   }
 
   private async handleGenerateSystemArch() {
@@ -715,16 +726,37 @@ export class ArchitecturePanel {
       this.ollamaService.setArchitectureContext(this.currentGraph, this.processingMode);
       this.ollamaService.setSystemArchitecture(this.currentSystemArch);
 
+      // If Gemma is cold-loading its model weights, the first token can take
+      // many seconds.  Show a hint in the thinking bubble after a short delay
+      // so the user knows the request is in-flight rather than frozen.
+      let firstChunkReceived = false;
+      const loadingHintTimer = setTimeout(() => {
+        if (!firstChunkReceived) {
+          this.panel.webview.postMessage({
+            type: WebviewMessageType.ChatThinking,
+            payload: { content: 'Loading model into memory, please wait…' },
+          });
+        }
+      }, 3000);
+
       const response = await this.ollamaService.chat(
         content,
         modelOpt.ollamaTag,
         (chunk) => {
+          if (!firstChunkReceived) {
+            firstChunkReceived = true;
+            clearTimeout(loadingHintTimer);
+          }
           this.panel.webview.postMessage({
             type: WebviewMessageType.ChatChunk,
             payload: { content: chunk },
           });
         },
         (thinkChunk) => {
+          if (!firstChunkReceived) {
+            firstChunkReceived = true;
+            clearTimeout(loadingHintTimer);
+          }
           this.panel.webview.postMessage({
             type: WebviewMessageType.ChatThinking,
             payload: { content: thinkChunk },
@@ -732,6 +764,8 @@ export class ArchitecturePanel {
         },
         this.processingMode
       );
+
+      clearTimeout(loadingHintTimer);
 
       this.panel.webview.postMessage({
         type: WebviewMessageType.ChatResponse,
