@@ -2,9 +2,18 @@
  * Kokoro TTS worker.
  *
  * Runs `kokoro-js` off the UI thread for lag-free synthesis.
- * The model and voice files are pre-downloaded into webview-ui/dist/kokoro-model/
- * (fully offline). On init we install a fetch shim that rewrites HF URLs to
- * our local webview base URI — no network access ever occurs at runtime.
+ * Model and voice files are pre-bundled into the extension under
+ * webview-ui/dist/kokoro-model/ (populated once by `npm run download-kokoro`).
+ *
+ * On init a fetch shim is installed that intercepts every HuggingFace model
+ * URL constructed by transformers.js / kokoro-js and redirects it to the
+ * corresponding pre-bundled local asset served via the VS Code webview
+ * resource server.  No network access is ever attempted — Kokoro works
+ * completely offline from first activation.
+ *
+ * The shim uses a generous per-request timeout (60 s) so the ~80 MB ONNX
+ * binary can be served even on a cold VS Code start where the webview
+ * resource server is still warming up.
  *
  * Protocol (main ↔ worker):
  *   init   → { type:'init', modelBase:string, ortBase:string }
@@ -21,22 +30,15 @@
  *   error  ← { type:'error', id?:number, message:string }
  *
  * Latency strategy:
- *   We use kokoro-js stream() + TextSplitterStream so the model produces audio
- *   with natural sentence-level prosody. Each sentence chunk is posted to the
- *   main thread the moment it finishes synthesising, so the AudioContext can
- *   start playing sentence 1 while sentence 2 is still being synthesised.
- *
- *   Critical fetch-shim requirement:
- *   kokoro-js fetches voice .bin files (and model files via transformers.js)
- *   from 'resolve/main/' URLs — NOT 'tree/main/'. Using the wrong prefix means
- *   the shim never intercepts anything → every voice load tries the network →
- *   fails offline → 20-30 s hang per paragraph. The constant below is correct.
+ *   kokoro-js stream() + TextSplitterStream yields one audio chunk per
+ *   sentence; each is posted to the main thread immediately so the
+ *   AudioContext can start playing sentence 1 while sentence 2 is still
+ *   being synthesised.
  *
  *   Background voice warming:
- *   After the ONNX graph is JIT-compiled by the first warmVoice(), all other
- *   bundled English voices are warmed in parallel (fire-and-forget). Each is
- *   just a ~100 KB local file load at that point — very fast. Voice switches
- *   are instant once the background warming settles.
+ *   After the ONNX graph is JIT-compiled by the first warmVoice(), all
+ *   other bundled English voices warm in parallel. Voice switches are
+ *   instant once settling completes.
  */
 
 import { KokoroTTS, TextSplitterStream, env } from 'kokoro-js';
@@ -68,44 +70,170 @@ let stopFlag = 0;
 const warmedVoices = new Set<string>();
 const inflightWarm = new Map<string, Promise<void>>();
 
-// IMPORTANT: kokoro-js voice fetches use resolve/main/ — NOT tree/main/.
-const HF_RESOLVE_BASE = 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/';
+// HuggingFace base URL for all Kokoro model assets (config, tokenizer, ONNX, voices).
+// The fetch shim intercepts every request that starts with this prefix and
+// redirects it to the corresponding pre-bundled local asset in dist/kokoro-model/.
+// This covers both transformers.js model-file fetches AND kokoro-js's own voice
+// loader — keeping the extension fully offline.
+const HF_MODEL_URL_PREFIX = 'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/';
 
-function installFetchShim(localBase: string): void {
-    const base = localBase.endsWith('/') ? localBase : localBase + '/';
-    const orig = self.fetch.bind(self);
-    self.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+/**
+ * Install a minimal fetch shim that redirects every HuggingFace URL for
+ * Kokoro model assets to the localhost HTTP server started by the extension
+ * host (ArchitecturePanel.startModelServer).
+ *
+ * Model files (config.json, tokenizer.json, onnx/model_quantized.onnx) are
+ * loaded by transformers.js; voice files (voices/*.bin) are loaded by
+ * kokoro-js's own internal loader — both hardcode HF URLs so both are covered
+ * by this single shim.
+ *
+ * All requests go to http://127.0.0.1:PORT which is a plain Node.js HTTP
+ * server with no size or concurrency limitations.  This completely avoids the
+ * HTTP 408 errors that the VS Code webview resource server returns for large
+ * binary files (~82 MB ONNX) fetched from a blob: worker context.
+ */
+function installFetchShim(localModelBase: string): void {
+    const modelBase = localModelBase.endsWith('/') ? localModelBase : localModelBase + '/';
+    const orig: typeof fetch = (self as typeof globalThis).fetch.bind(self);
+
+    const shimmedFetch: typeof fetch = (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === 'string' ? input
             : input instanceof URL ? input.href
                 : (input as Request).url;
-        return url.startsWith(HF_RESOLVE_BASE)
-            ? orig(base + url.slice(HF_RESOLVE_BASE.length), init)
-            : orig(input as RequestInfo, init);
-    }) as typeof fetch;
+
+        // All Kokoro model + voice files: redirect HF URL → localhost asset server.
+        if (url.startsWith(HF_MODEL_URL_PREFIX)) {
+            const relativePath = url.slice(HF_MODEL_URL_PREFIX.length); // e.g. "config.json"
+            return orig(modelBase + relativePath, init);
+        }
+
+        // Block any remaining HuggingFace / CDN traffic (offline-only mode).
+        if (url.startsWith('https://huggingface.co/') || url.startsWith('https://cdn-lfs')) {
+            return Promise.resolve(new Response(null, { status: 404, statusText: 'Offline-only mode' }));
+        }
+
+        return orig(input as RequestInfo, init);
+    };
+
+    // Object.defineProperty guarantees the replacement sticks even if self.fetch
+    // has a non-writable descriptor in this Electron context.
+    try {
+        Object.defineProperty(self, 'fetch', { value: shimmedFetch, writable: true, configurable: true });
+    } catch {
+        (self as typeof globalThis).fetch = shimmedFetch;
+    }
+}
+
+// ── Init progress reporting ────────────────────────────────────────────────
+//
+// Progress 0..100 across two phases:
+//   load-model   0  → 90   (transformers.js progress_callback per-file)
+//   warm-voice  90  → 100  (first inference primes the ONNX graph)
+
+let lastReportedPercent = -1;
+
+function reportProgress(percent: number, stage: string, file?: string): void {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    if (clamped === lastReportedPercent) return; // coalesce identical updates
+    lastReportedPercent = clamped;
+    post({ type: 'initProgress', percent: clamped, stage, file });
 }
 
 async function init(modelBase: string, ortBase: string): Promise<void> {
+    // Install fetch shim before any kokoro-js voice loads (which use a
+    // hardcoded HF URL that bypasses transformers.js model loading).
+    // modelBase is now http://127.0.0.1:PORT/kokoro-model/onnx-community/…
     installFetchShim(modelBase);
 
-    // Point ORT WASM loader to our local copy (avoids jsdelivr CDN).
-    env.wasmPaths = ortBase.endsWith('/') ? ortBase : ortBase + '/';
+    // ── Configure transformers.js for offline operation. ───────────────────
+    //
+    // transformers.js builds its normal HuggingFace URLs and calls fetch().
+    // The shim intercepts every HF_MODEL_URL_PREFIX request and redirects it
+    // to the localhost asset server — no network traffic ever leaves the machine.
+    //
+    // allowRemoteModels MUST stay true so transformers.js calls fetch() at all.
+    // useBrowserCache = false avoids stale Cache API entries.
+    const envAny = env as unknown as Record<string, unknown>;
+    envAny.allowRemoteModels = true;
+    envAny.useBrowserCache = false;
 
+    // ORT WASM is also served from the localhost asset server (ortBase =
+    // http://127.0.0.1:PORT/ort/) so fetch() works without any shim handling.
+    // We still need to wrap the .jsep.mjs in a blob: URL because Electron
+    // won't dynamic-import() an http: URL from inside a blob: worker.
+    const wasmBase = ortBase.endsWith('/') ? ortBase : ortBase + '/';
+    try {
+        const mjsRes = await fetch(wasmBase + 'ort-wasm-simd-threaded.jsep.mjs');
+        if (mjsRes.ok) {
+            const mjsBuf = await mjsRes.arrayBuffer();
+            const mjsBlobUrl = URL.createObjectURL(
+                new Blob([mjsBuf], { type: 'text/javascript' }),
+            );
+            (env as unknown as { wasmPaths: unknown }).wasmPaths = {
+                mjs: mjsBlobUrl,
+                wasm: wasmBase + 'ort-wasm-simd-threaded.jsep.wasm',
+            };
+        } else {
+            // File missing — fall back to string base; ORT will attempt the
+            // import and surface the error naturally.
+            (env as unknown as { wasmPaths: unknown }).wasmPaths = wasmBase;
+        }
+    } catch {
+        (env as unknown as { wasmPaths: unknown }).wasmPaths = wasmBase;
+    }
+
+    // Load model — per-file byte progress maps to 0..90%.
+    const fileTotals = new Map<string, { loaded: number; total: number }>();
+    const LOAD_LO = 0, LOAD_HI = 90;
+
+    type ProgressInfo =
+        | { status: 'initiate'; name: string; file: string }
+        | { status: 'download'; name: string; file: string }
+        | { status: 'progress'; name: string; file: string; progress: number; loaded: number; total: number }
+        | { status: 'done'; name: string; file: string }
+        | { status: 'ready'; task?: string; model?: string };
+
+    const aggregate = (): number => {
+        let loaded = 0, total = 0, knownAny = false;
+        for (const v of fileTotals.values()) {
+            if (v.total > 0) { knownAny = true; loaded += v.loaded; total += v.total; }
+        }
+        if (!knownAny || total === 0) {
+            const entries = Array.from(fileTotals.values());
+            if (!entries.length) return 0;
+            return entries.filter(e => e.loaded > 0 && e.loaded === e.total).length / entries.length;
+        }
+        return loaded / total;
+    };
+
+    const loadPct = (frac: number) => LOAD_LO + (LOAD_HI - LOAD_LO) * Math.max(0, Math.min(1, frac));
+
+    const progressCallback = (info: ProgressInfo): void => {
+        if (info.status === 'initiate') {
+            if (!fileTotals.has(info.file)) fileTotals.set(info.file, { loaded: 0, total: 0 });
+            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
+        } else if (info.status === 'progress') {
+            fileTotals.set(info.file, { loaded: info.loaded ?? 0, total: info.total ?? 0 });
+            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
+        } else if (info.status === 'done') {
+            const cur = fileTotals.get(info.file);
+            fileTotals.set(info.file, { loaded: cur?.total || 1, total: cur?.total || 1 });
+            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
+        }
+    };
+
+    reportProgress(0, 'Loading Kokoro TTS engine');
     tts = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
         dtype: 'q8',
         device: 'wasm',
+        progress_callback: progressCallback as unknown as Parameters<typeof KokoroTTS.from_pretrained>[1] extends { progress_callback?: infer P } ? P : never,
     });
+    reportProgress(LOAD_HI, 'Neural model loaded');
 
-    // Phase 1 (blocking): warm default voice.
-    // JIT-compiles the ONNX graph, warms phonemizer WASM, loads af_alloy.bin.
+    // Warm default voice — JIT-compiles the ONNX graph + espeak WASM.
+    reportProgress(90, 'Warming default voice');
     await warmVoice('af_alloy');
-
-    // Phase 2 (background): warm all other bundled voices SEQUENTIALLY.
-    // void (async () => {
-    //     for (const v of ALL_ENGLISH_VOICES) {
-    //         if (v === 'af_alloy') continue;
-    //         try { await warmVoice(v); } catch { /* swallow per-voice */ }
-    //     }
-    // })();
+    reportProgress(100, 'Voice engine ready');
 }
 
 /** Run a silent inference for 'voice' so subsequent speak()s are instant. */

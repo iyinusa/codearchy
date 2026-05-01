@@ -1278,12 +1278,13 @@ body {
 
 .kokoro-activate-card {
     border: 1px solid var(--node-border);
-    border-radius: 10px;
+    border-radius: 12px;
     padding: 18px;
-    background: linear-gradient(135deg, rgba(124, 77, 255, 0.08), rgba(26, 35, 126, 0.05));
+    background: linear-gradient(135deg, rgba(124, 77, 255, 0.10), rgba(26, 35, 126, 0.06));
     display: flex;
     flex-direction: column;
     gap: 14px;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
 }
 
 .kokoro-activate-header {
@@ -1292,9 +1293,18 @@ body {
     gap: 14px;
 }
 
+.kokoro-activate-header>.icon-wrap,
+.kokoro-activate-header>svg {
+    color: #b39dff;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
 .kokoro-activate-header h3 {
-    font-size: 15px;
+    font-size: 14px;
     margin: 0 0 4px;
+    font-weight: 600;
+    letter-spacing: 0.1px;
 }
 
 .kokoro-activate-header p {
@@ -1318,30 +1328,93 @@ body {
     color: #7c4dff;
 }
 
+/* Activate button — gradient primary action, matches modal aesthetic. */
 .kokoro-activate-btn {
     align-self: flex-start;
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    padding: 9px 18px;
+    border: 0;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #7c4dff 0%, #4a148c 100%);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(124, 77, 255, 0.32),
+        0 1px 0 rgba(255, 255, 255, 0.18) inset;
+    transition: transform 0.12s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.kokoro-activate-btn:hover {
+    filter: brightness(1.08);
+    box-shadow: 0 3px 14px rgba(124, 77, 255, 0.45),
+        0 1px 0 rgba(255, 255, 255, 0.22) inset;
+    transform: translateY(-1px);
+}
+
+.kokoro-activate-btn:active {
+    transform: translateY(0);
+    filter: brightness(0.96);
+    box-shadow: 0 1px 4px rgba(124, 77, 255, 0.30),
+        0 1px 0 rgba(255, 255, 255, 0.14) inset;
+}
+
+.kokoro-activate-btn:focus-visible {
+    outline: 2px solid #b39dff;
+    outline-offset: 2px;
+}
+
+.kokoro-activate-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+
+.kokoro-activate-btn .icon,
+.kokoro-activate-btn svg {
+    font-size: 11px;
 }
 
 .kokoro-progress {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    padding: 14px 16px;
+    border: 1px solid var(--node-border);
+    border-radius: 10px;
+    background: rgba(124, 77, 255, 0.04);
 }
 
 .kokoro-progress-bar {
-    height: 6px;
+    height: 8px;
     background: var(--input-bg);
-    border-radius: 3px;
+    border-radius: 999px;
     overflow: hidden;
+    position: relative;
 }
 
 .kokoro-progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, #7c4dff, #4a148c);
-    transition: width 0.25s ease-out;
+    background: linear-gradient(90deg, #7c4dff, #b39dff, #4a148c);
+    background-size: 200% 100%;
+    animation: kokoroProgressShimmer 2.4s linear infinite;
+    transition: width 0.3s ease-out;
+    border-radius: 999px;
+    box-shadow: 0 0 8px rgba(124, 77, 255, 0.55);
+}
+
+@keyframes kokoroProgressShimmer {
+    0% {
+        background-position: 0% 50%;
+    }
+
+    100% {
+        background-position: 200% 50%;
+    }
 }
 
 .kokoro-progress-text {
@@ -1349,7 +1422,47 @@ body {
     align-items: center;
     gap: 8px;
     font-size: 12px;
-    opacity: 0.8;
+    opacity: 0.85;
+}
+
+.kokoro-progress-text span {
+    font-variant-numeric: tabular-nums;
+}
+
+.kokoro-progress-file {
+    font-size: 11px;
+    opacity: 0.55;
+    font-family: var(--vscode-editor-font-family, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kokoro-error-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.kokoro-retry-btn {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--node-border);
+    background: var(--input-bg);
+    color: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.kokoro-retry-btn:hover {
+    background: rgba(124, 77, 255, 0.12);
+    border-color: #7c4dff;
 }
 
 .kokoro-error {

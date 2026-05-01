@@ -23,6 +23,7 @@ import {
     kokoroGenerate,
     playKokoroPcm,
     type KokoroAudio,
+    type KokoroInitProgress,
 } from './kokoroTTS';
 import { subscribeVoiceConfig } from './voiceConfig';
 import { DEFAULT_KOKORO_VOICE } from './kokoroVoices';
@@ -113,25 +114,72 @@ export function subscribeSynthesizing(listener: (s: boolean) => void): () => voi
 // ── Kokoro load state ───────────────────────────────────────────────────────
 
 type KokoroStatus = 'idle' | 'loading' | 'ready' | 'error';
+export interface KokoroStatusSnapshot {
+    status: KokoroStatus;
+    error: string | null;
+    /** Init progress 0..100 — only meaningful while status === 'loading'. */
+    progress: number;
+    /** Human-readable current init stage (e.g. "Loading neural model"). */
+    stage: string | null;
+    /** Optional file currently being loaded — surfaces granular detail. */
+    file: string | null;
+}
+
 let kokoroStatus: KokoroStatus = 'idle';
 let kokoroError: string | null = null;
-const kokoroListeners = new Set<(s: { status: KokoroStatus; error: string | null }) => void>();
+let kokoroProgress = 0;
+let kokoroStage: string | null = null;
+let kokoroFile: string | null = null;
+const kokoroListeners = new Set<(s: KokoroStatusSnapshot) => void>();
+
+function snapshotKokoro(): KokoroStatusSnapshot {
+    return {
+        status: kokoroStatus,
+        error: kokoroError,
+        progress: kokoroProgress,
+        stage: kokoroStage,
+        file: kokoroFile,
+    };
+}
+
+function emitKokoro(): void {
+    const snap = snapshotKokoro();
+    kokoroListeners.forEach(l => { try { l(snap); } catch { /* ignore */ } });
+}
 
 function setKokoroStatus(status: KokoroStatus, error: string | null = null): void {
     kokoroStatus = status;
     kokoroError = error;
-    kokoroListeners.forEach(l => { try { l({ status, error }); } catch { /* ignore */ } });
+    if (status === 'ready') {
+        kokoroProgress = 100;
+        kokoroStage = 'Voice engine ready';
+    } else if (status === 'idle' || status === 'error') {
+        kokoroProgress = 0;
+        kokoroStage = null;
+        kokoroFile = null;
+    }
+    emitKokoro();
 }
 
-export function getKokoroStatus(): { status: KokoroStatus; error: string | null } {
-    return { status: kokoroStatus, error: kokoroError };
+function setKokoroProgress(p: KokoroInitProgress): void {
+    if (kokoroStatus !== 'loading') return;
+    // Progress is monotonic — never let stale events drag the bar backwards.
+    if (p.percent < kokoroProgress) return;
+    kokoroProgress = p.percent;
+    kokoroStage = p.stage;
+    kokoroFile = p.file ?? null;
+    emitKokoro();
+}
+
+export function getKokoroStatus(): KokoroStatusSnapshot {
+    return snapshotKokoro();
 }
 
 export function subscribeKokoroStatus(
-    listener: (s: { status: KokoroStatus; error: string | null }) => void,
+    listener: (s: KokoroStatusSnapshot) => void,
 ): () => void {
     kokoroListeners.add(listener);
-    listener({ status: kokoroStatus, error: kokoroError });
+    listener(snapshotKokoro());
     return () => { kokoroListeners.delete(listener); };
 }
 
@@ -146,8 +194,11 @@ export function startKokoroEngine(): Promise<void> {
             });
         });
     }
+    kokoroProgress = 0;
+    kokoroStage = 'Activating';
+    kokoroFile = null;
     setKokoroStatus('loading');
-    return initKokoro()
+    return initKokoro(setKokoroProgress)
         .then(() => {
             setKokoroStatus('ready');
             // Warm the user's currently-selected voice so their FIRST speak()
@@ -365,9 +416,11 @@ export async function synthesizeKokoroAudio(
 ): Promise<KokoroAudio | null> {
     const clean = cleanText(text);
     if (!clean) return null;
-    if (!isKokoroReady()) {
-        try { await startKokoroEngine(); } catch { return null; }
-    }
+    // Kokoro must be explicitly activated by the user from the Voice
+    // Configuration modal. Background features (narrator preload, story
+    // pre-synth) silently no-op when the engine isn't ready instead of
+    // surreptitiously triggering a multi-second download/init.
+    if (!isKokoroReady()) return null;
     const target = voiceId ?? getVoiceConfig().voiceId ?? DEFAULT_KOKORO_VOICE;
     return new Promise<KokoroAudio | null>((resolve) => {
         enqueueKokoroJob({ priority, text: clean, voiceId: target, onProgress, resolve });

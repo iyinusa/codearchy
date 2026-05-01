@@ -971,11 +971,38 @@ function formatMessage(text: string): React.ReactNode {
         }
 
         // Ordered list (1. item)
+        // Many local models (Gemma included) emit ordered list items separated
+        // by blank lines AND/OR with the literal "1." marker on every item
+        // ("1. … 1. … 1. …"). Two fixes here:
+        //   (a) collect items across blank-line gaps as long as the next
+        //       non-blank line is also a numbered item — keeps them in a
+        //       single <ol> so the CSS `list-style-type: decimal` counter
+        //       produces 1, 2, 3, … instead of 1, 1, 1, …
+        //   (b) we deliberately ignore the model's literal number — the
+        //       browser's auto-numbering supplies the correct sequence,
+        //       which also self-corrects "1., 2., 1., 3." style sloppiness.
         if (/^\s*\d+\.\s/.test(line)) {
             const items: string[] = [];
-            while (i < lines.length && /^\s*\d+\.\s/.test(lines[i])) {
-                items.push(lines[i].replace(/^\s*\d+\.\s/, ''));
-                i++;
+            // First item.
+            items.push(lines[i].replace(/^\s*\d+\.\s/, ''));
+            i++;
+            while (i < lines.length) {
+                const cur = lines[i];
+                if (/^\s*\d+\.\s/.test(cur)) {
+                    items.push(cur.replace(/^\s*\d+\.\s/, ''));
+                    i++;
+                    continue;
+                }
+                if (cur.trim() === '') {
+                    // Look ahead past consecutive blanks for another numbered item.
+                    let j = i + 1;
+                    while (j < lines.length && lines[j].trim() === '') j++;
+                    if (j < lines.length && /^\s*\d+\.\s/.test(lines[j])) {
+                        i = j; // skip the blanks, continue the same list
+                        continue;
+                    }
+                }
+                break;
             }
             nodes.push(
                 <ol key={k++} className="chat-md-ol">

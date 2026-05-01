@@ -13,3 +13,5 @@ webview-ui/src/**
 webview-ui/node_modules/**
 webview-ui/kokoro-model/**
 scripts/**
+test-profile/**
+test-extensions/**

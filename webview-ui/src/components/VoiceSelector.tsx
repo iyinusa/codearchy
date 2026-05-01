@@ -32,30 +32,40 @@ interface VoiceSelectorProps {
 interface KokoroLoadState {
     status: 'idle' | 'loading' | 'ready' | 'error';
     error?: string;
+    progress: number;
+    stage: string | null;
+    file: string | null;
 }
 
 export function VoiceSelector({ onClose }: VoiceSelectorProps) {
     const [config, setConfig] = useState<VoiceConfig>(() => getVoiceConfig());
     const [webVoices, setWebVoices] = useState<SpeechSynthesisVoice[]>([]);
-    const [kokoroState, setKokoroState] = useState<KokoroLoadState>({ status: 'idle' });
+    const [kokoroState, setKokoroState] = useState<KokoroLoadState>({
+        status: 'idle', progress: 0, stage: null, file: null,
+    });
     const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
     const [activeEngine, setActiveEngine] = useState<VoiceEngineId>(config.engine);
 
     useEffect(() => subscribeVoiceConfig(setConfig), []);
     useEffect(() => subscribeWebSpeechVoices(setWebVoices), []);
     useEffect(() => subscribeSpeaking((sp) => { if (!sp) setTestingVoiceId(null); }), []);
-    useEffect(() => subscribeKokoroStatus(({ status, error }) =>
-        setKokoroState({ status, error: error ?? undefined }),
+    useEffect(() => subscribeKokoroStatus((s) =>
+        setKokoroState({
+            status: s.status,
+            error: s.error ?? undefined,
+            progress: s.progress,
+            stage: s.stage,
+            file: s.file,
+        }),
     ), []);
-
-    // Ensure the engine is warming when the user opens this modal — a no-op
-    // if App.tsx already kicked it off on mount.
-    useEffect(() => {
-        void startKokoroEngine().catch(() => { /* surfaced via subscribeKokoroStatus */ });
-    }, []);
 
     // Stop any test speech when the modal closes.
     useEffect(() => () => stopSpeaking(), []);
+
+    const handleActivateKokoro = useCallback(() => {
+        // User-initiated; surfaced errors come back through subscribeKokoroStatus.
+        void startKokoroEngine().catch(() => undefined);
+    }, []);
 
     const webVoiceOptions: VoiceOption[] = useMemo(
         () =>
@@ -199,10 +209,10 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                 {kokoroState.status === 'ready'
                                     ? 'Neural · Offline · Pre-bundled'
                                     : kokoroState.status === 'loading'
-                                        ? 'Initialising voice engine…'
+                                        ? `Activating… ${kokoroState.progress}%`
                                         : kokoroState.status === 'error'
                                             ? 'Engine error — see details'
-                                            : 'Neural · Offline · Pre-bundled'}
+                                            : 'Neural · Offline · Tap Activate'}
                             </span>
                         </div>
                     </button>
@@ -219,25 +229,78 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 ) : (
                     <div className="voice-section">
                         <p className="voice-section-desc">
-                            Kokoro-82M is pre-bundled with the extension. Pick a voice and tap
-                            <strong> Test</strong> to preview.
+                            Kokoro-82M is pre-bundled with the extension. Click
+                            <strong> Activate</strong> — the engine loads the local model files
+                            (or downloads them on first run if missing) then warms up
+                            inference for instant speech. All processing happens on your machine.
                             <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 sec to process paragraph). Still in BETA stage.</p>
                         </p>
-                        {kokoroState.status === 'loading' && (
-                            <div className="kokoro-progress">
-                                <div className="kokoro-progress-text">
-                                    <Icon name="spinner" spin /> Loading neural voice engine…
+
+                        {kokoroState.status === 'idle' && (
+                            <div className="kokoro-activate-card">
+                                <div className="kokoro-activate-header">
+                                    <Icon name="aiMagic" />
+                                    <div>
+                                        <h3>Activate neural voice engine</h3>
+                                        <p>
+                                            Loads the local Kokoro-82M model — or downloads it from
+                                            HuggingFace if not yet bundled — then caches it for
+                                            fully offline use. No telemetry, no cloud.
+                                        </p>
+                                    </div>
                                 </div>
-                                <p className="kokoro-loading-hint">
-                                    Test buttons activate once the model is ready.
-                                </p>
+                                <ul className="kokoro-bullets">
+                                    <li>Loads pre-bundled model files (or downloads on first run)</li>
+                                    <li>Warms the inference graph for instant speech</li>
+                                    <li>Runs entirely offline after first activation</li>
+                                </ul>
+                                <button
+                                    className="kokoro-activate-btn"
+                                    onClick={handleActivateKokoro}
+                                >
+                                    <Icon name="play" /> Activate Kokoro
+                                </button>
                             </div>
                         )}
+
+                        {kokoroState.status === 'loading' && (
+                            <div className="kokoro-progress" aria-live="polite">
+                                <div className="kokoro-progress-bar" role="progressbar"
+                                    aria-valuenow={kokoroState.progress}
+                                    aria-valuemin={0} aria-valuemax={100}>
+                                    <div
+                                        className="kokoro-progress-fill"
+                                        style={{ width: `${kokoroState.progress}%` }}
+                                    />
+                                </div>
+                                <div className="kokoro-progress-text">
+                                    <Icon name="spinner" spin />
+                                    <span>
+                                        {kokoroState.stage ?? 'Activating'}… {kokoroState.progress}%
+                                    </span>
+                                </div>
+                                {kokoroState.file && (
+                                    <div className="kokoro-progress-file" title={kokoroState.file}>
+                                        {kokoroState.file}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         {kokoroState.status === 'error' && (
-                            <div className="kokoro-error">
-                                <Icon name="warning" /> {kokoroState.error}
+                            <div className="kokoro-error-block">
+                                <div className="kokoro-error">
+                                    <Icon name="warning" /> {kokoroState.error}
+                                </div>
+                                <button
+                                    className="kokoro-retry-btn"
+                                    onClick={handleActivateKokoro}
+                                >
+                                    <Icon name="refresh" /> Retry activation
+                                </button>
                             </div>
                         )}
+
                         {renderVoiceList('kokoro')}
                     </div>
                 )}

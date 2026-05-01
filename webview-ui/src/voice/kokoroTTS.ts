@@ -24,6 +24,8 @@ declare global {
 let worker: Worker | null = null;
 let ready = false;
 let readyPromise: Promise<void> | null = null;
+// Active init-progress sink (set by initKokoro caller, cleared on ready/error).
+let activeInitProgress: ((p: KokoroInitProgress) => void) | null = null;
 let audioCtx: AudioContext | null = null;
 
 // Each speak() call gets a unique ID so chunks can be matched back.
@@ -119,12 +121,20 @@ function emitSynthState(synthesizing: boolean): void {
 
 type WorkerOut =
     | { type: 'ready' }
+    | { type: 'initProgress'; percent: number; stage: string; file?: string }
     | { type: 'warmed'; voice: string }
     | { type: 'chunk'; id: number; pcm: Float32Array; sampleRate: number }
     | { type: 'end'; id: number }
     | { type: 'generated'; id: number; pcm: Float32Array; sampleRate: number }
     | { type: 'generateProgress'; id: number; done: number; total: number }
     | { type: 'error'; id?: number; message: string };
+
+/** Init-time progress payload exposed to the UI. */
+export interface KokoroInitProgress {
+    percent: number;   // 0..100
+    stage: string;     // human-readable label
+    file?: string;     // optional file currently being loaded
+}
 
 function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
     const msg = ev.data;
@@ -247,9 +257,14 @@ function flushQueued(): void {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 
-export function initKokoro(): Promise<void> {
+export function initKokoro(onProgress?: (p: KokoroInitProgress) => void): Promise<void> {
     if (ready) return Promise.resolve();
-    if (readyPromise) return readyPromise;
+    if (readyPromise) {
+        // Late subscriber to an already-running init: replace the active
+        // progress sink so the new caller still sees forthcoming updates.
+        if (onProgress) activeInitProgress = onProgress;
+        return readyPromise;
+    }
 
     const workerUri = window.CODEARCHY_KOKORO_WORKER_URI;
     const modelBase = window.CODEARCHY_KOKORO_MODEL_BASE_URI;
@@ -258,6 +273,8 @@ export function initKokoro(): Promise<void> {
     if (!workerUri || !modelBase || !ortBase) {
         return Promise.reject(new Error('Kokoro asset URIs not injected by the extension host.'));
     }
+
+    activeInitProgress = onProgress ?? null;
 
     readyPromise = new Promise<void>((resolve, reject) => {
         // VS Code webview blocks new Worker(vscode-resource://...) directly.
@@ -273,22 +290,36 @@ export function initKokoro(): Promise<void> {
                 URL.revokeObjectURL(blobUrl);
                 worker = w;
                 const onInitMsg = (ev: MessageEvent<WorkerOut>) => {
+                    if (ev.data.type === 'initProgress') {
+                        const cb = activeInitProgress;
+                        if (cb) {
+                            try { cb({ percent: ev.data.percent, stage: ev.data.stage, file: ev.data.file }); }
+                            catch { /* ignore */ }
+                        }
+                        return;
+                    }
                     if (ev.data.type === 'ready') {
                         ready = true;
                         w.removeEventListener('message', onInitMsg);
                         w.addEventListener('message', onWorkerMessage);
+                        activeInitProgress = null;
                         resolve();
                     } else if (ev.data.type === 'error') {
                         w.removeEventListener('message', onInitMsg);
+                        activeInitProgress = null;
                         reject(new Error(ev.data.message));
                     }
                 };
                 w.addEventListener('message', onInitMsg);
-                w.addEventListener('error', (e) => reject(new Error(e.message || 'Worker failed')));
+                w.addEventListener('error', (e) => {
+                    activeInitProgress = null;
+                    reject(new Error(e.message || 'Worker failed'));
+                });
                 w.postMessage({ type: 'init', modelBase, ortBase });
             })
             .catch(err => {
                 readyPromise = null;
+                activeInitProgress = null;
                 reject(err);
             });
     });

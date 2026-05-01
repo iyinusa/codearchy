@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = 'onnx-community/Kokoro-82M-v1.0-ONNX';
-const REVISION = 'tree/main';
+const REVISION = 'main';
 const MODEL_BASE = `https://huggingface.co/${REPO}/resolve/${REVISION}`;
 
 // Files needed for KokoroTTS.from_pretrained(REPO, { dtype: 'q8' }).

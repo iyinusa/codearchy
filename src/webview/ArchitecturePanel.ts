@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as http from 'http';
 import { ArchitectureGraph, WebviewMessage, WebviewMessageType } from '../types';
 import { OllamaService, MODEL_OPTIONS, SystemArchitecture, ProcessingMode } from '../inference/OllamaService';
 import { HostAudioRecorder } from '../audio/HostAudioRecorder';
@@ -36,6 +37,11 @@ export class ArchitecturePanel {
   private processingMode: ProcessingMode = 'moderate';
   private hostRecorder: HostAudioRecorder = new HostAudioRecorder();
   private extensionContext: vscode.ExtensionContext;
+  /** Localhost HTTP server that serves pre-bundled Kokoro model + ORT WASM files.
+   *  Bypasses the VS Code webview resource server which returns HTTP 408 for large
+   *  binary files (the ~82 MB ONNX) when fetched from a blob: worker context. */
+  private modelServer: http.Server | null = null;
+  private modelServerPort = 0;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
     this.panel = panel;
@@ -52,6 +58,16 @@ export class ArchitecturePanel {
     this.processingMode = config.get<ProcessingMode>('aiProcessing', 'moderate');
 
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+
+    // Start the localhost model server asynchronously; set the webview HTML
+    // once the port is known (address() returns null until 'listening' fires).
+    this.startModelServer().then(port => {
+      this.modelServerPort = port;
+      this.panel.webview.html = this.getWebviewContent();
+      if (this.currentGraph) {
+        this.sendGraphData(this.currentGraph);
+      }
+    });
 
     this.panel.webview.onDidReceiveMessage(
       (message: WebviewMessage) => this.handleMessage(message),
@@ -86,8 +102,9 @@ export class ArchitecturePanel {
 
     ArchitecturePanel.instance = new ArchitecturePanel(panel, extensionUri, context);
     ArchitecturePanel.instance.panel.iconPath = new vscode.ThemeIcon('type-hierarchy');
-    ArchitecturePanel.instance.panel.webview.html = ArchitecturePanel.instance.getWebviewContent();
     ArchitecturePanel.instance.currentGraph = graph;
+    // webview.html is set asynchronously inside the constructor once the
+    // localhost model server has started and its port is known.
   }
 
   static update(graph: ArchitectureGraph) {
@@ -767,11 +784,81 @@ export class ArchitecturePanel {
   private dispose() {
     ArchitecturePanel.instance = undefined;
     this.hostRecorder.cancel();
+    this.modelServer?.close();
+    this.modelServer = null;
     this.panel.dispose();
     while (this.disposables.length) {
       const d = this.disposables.pop();
       if (d) d.dispose();
     }
+  }
+
+  /**
+   * Start a minimal localhost HTTP server to serve Kokoro model files and ORT
+   * WASM binaries from `webview-ui/dist/` directly off disk.
+   *
+   * VS Code's webview resource server returns HTTP 408 for large binary files
+   * (e.g., the ~82 MB quantized ONNX) when they are requested from a blob:
+   * worker, making it unsuitable for serving model assets. A plain localhost
+   * HTTP server has no such limitations and is already whitelisted by the CSP
+   * (`connect-src http://127.0.0.1:*`).
+   */
+  private startModelServer(): Promise<number> {
+    const distPath = path.join(this.extensionUri.fsPath, 'webview-ui', 'dist');
+    const MIME: Record<string, string> = {
+      '.json': 'application/json',
+      '.onnx': 'application/octet-stream',
+      '.bin': 'application/octet-stream',
+      '.wasm': 'application/wasm',
+      '.mjs': 'text/javascript',
+      '.js': 'text/javascript',
+    };
+
+    this.modelServer = http.createServer((req, res) => {
+      // Handle preflight (shouldn't be needed but be defensive)
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
+        res.end();
+        return;
+      }
+
+      const rawPath = req.url?.split('?')[0] ?? '/';
+      let relPath: string;
+      try {
+        relPath = decodeURIComponent(rawPath);
+      } catch {
+        res.writeHead(400); res.end(); return;
+      }
+      // Normalise and strip any leading traversal sequences.
+      relPath = path.normalize(relPath);
+      if (relPath.startsWith('..')) { res.writeHead(403); res.end(); return; }
+
+      const filePath = path.join(distPath, relPath);
+      // Belt-and-braces path-traversal guard.
+      if (!filePath.startsWith(distPath + path.sep) && filePath !== distPath) {
+        res.writeHead(403); res.end(); return;
+      }
+
+      let stat: fs.Stats;
+      try { stat = fs.statSync(filePath); } catch { res.writeHead(404); res.end(); return; }
+      if (!stat.isFile()) { res.writeHead(404); res.end(); return; }
+
+      const ext = path.extname(filePath).toLowerCase();
+      res.writeHead(200, {
+        'Content-Type': MIME[ext] ?? 'application/octet-stream',
+        'Content-Length': stat.size,
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      });
+      fs.createReadStream(filePath).pipe(res);
+    });
+
+    return new Promise<number>((resolve) => {
+      this.modelServer!.listen(0, '127.0.0.1', () => {
+        const addr = this.modelServer!.address() as { port: number };
+        resolve(addr.port);
+      });
+    });
   }
 
   private getWebviewContent(): string {
@@ -801,17 +888,13 @@ export class ArchitecturePanel {
       const iconUri = webview.asWebviewUri(
         vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.png')
       );
-      // ORT (ONNX Runtime Web) assets are copied into webview-ui/dist/ort/
-      // by esbuild. We expose the base URI so the Kokoro worker can point
-      // `wasmPaths` at our own origin instead of the default jsdelivr CDN.
-      const ortBaseUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'ort')
-      );
-      // Pre-bundled Kokoro-82M model + voices live under webview-ui/dist/kokoro-model/.
-      // The worker installs a fetch shim that translates HF URLs to this base.
-      const kokoroModelBaseUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'kokoro-model', 'onnx-community', 'Kokoro-82M-v1.0-ONNX')
-      );
+      // Model files and ORT WASM are served via a localhost HTTP server started
+      // in the extension host.  This avoids VS Code webview resource server HTTP 408
+      // errors that occur when a blob: worker fetches large binary files (e.g., the
+      // ~82 MB quantized ONNX) through the vscode-webview:// scheme.
+      const modelServerBase = `http://127.0.0.1:${this.modelServerPort}`;
+      const ortBaseUri = `${modelServerBase}/ort`;
+      const kokoroModelBaseUri = `${modelServerBase}/kokoro-model/onnx-community/Kokoro-82M-v1.0-ONNX`;
       const kokoroWorkerUri = webview.asWebviewUri(
         vscode.Uri.joinPath(this.extensionUri, 'webview-ui', 'dist', 'kokoroWorker.js')
       );
@@ -821,7 +904,7 @@ export class ArchitecturePanel {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${webview.cspSource} blob:; img-src ${webview.cspSource} data: blob:; font-src data:; connect-src ${webview.cspSource} http://localhost:* http://127.0.0.1:*; worker-src ${webview.cspSource} blob:; child-src blob:; media-src ${webview.cspSource} data: blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${webview.cspSource} blob:; img-src ${webview.cspSource} data: blob:; font-src data:; connect-src ${webview.cspSource} http://localhost:* http://127.0.0.1:* https://huggingface.co; worker-src ${webview.cspSource} blob:; child-src blob:; media-src ${webview.cspSource} data: blob:;">
   <title>CodeArchy Architecture</title>
   <link rel="stylesheet" href="${cssUri}">
   <link rel="stylesheet" href="${baseStylesUri}">

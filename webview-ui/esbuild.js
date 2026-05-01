@@ -11,7 +11,7 @@ const isWatch = process.argv.includes('--watch');
 function copyOrtAssets() {
     const src = path.join(__dirname, 'node_modules', '@huggingface', 'transformers', 'dist');
     const dest = path.join(__dirname, 'dist', 'ort');
-    const assets = ['ort-wasm-simd-threaded.jsep.wasm'];
+    const assets = ['ort-wasm-simd-threaded.jsep.wasm', 'ort-wasm-simd-threaded.jsep.mjs'];
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
     for (const name of assets) {
         const from = path.join(src, name);

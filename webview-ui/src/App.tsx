@@ -15,7 +15,7 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
-import { startKokoroEngine, subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId } from './voice/ttsManager';
+import { subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId } from './voice/ttsManager';
 import {
     setProjectId,
     getProjectId,
@@ -78,14 +78,9 @@ export function App() {
         }
     }, [archStream]);
 
-    // Eagerly boot the pre-bundled Kokoro TTS worker so the model is warm
-    // by the time the user triggers their first speak() — no install,
-    // no download, no UI lag during synthesis.
-    useEffect(() => {
-        void startKokoroEngine().catch((err) => {
-            console.warn('[CodeArchy] Kokoro engine failed to start:', err);
-        });
-    }, []);
+    // Kokoro is no longer eagerly started on app mount — the user explicitly
+    // activates the neural voice engine from the Voice Configuration modal.
+    // This avoids surprising background work on first webview launch.
 
     // Mirror the TTS "synthesizing" flag into local state so we can render
     // a top-right processing indicator while the engine prepares audio.
