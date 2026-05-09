@@ -15,7 +15,8 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
-import { subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId } from './voice/ttsManager';
+import { subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId, startKokoroEngine } from './voice/ttsManager';
+import { getVoiceConfig } from './voice/voiceConfig';
 import {
     setProjectId,
     getProjectId,
@@ -78,9 +79,14 @@ export function App() {
         }
     }, [archStream]);
 
-    // Kokoro is no longer eagerly started on app mount — the user explicitly
-    // activates the neural voice engine from the Voice Configuration modal.
-    // This avoids surprising background work on first webview launch.
+    // Auto-boot Kokoro on mount if the user previously selected it as their
+    // engine. This means activation is a one-time choice — the engine starts
+    // silently in the background on every subsequent webview load.
+    useEffect(() => {
+        if (getVoiceConfig().engine === 'kokoro') {
+            void startKokoroEngine().catch(() => undefined);
+        }
+    }, []);
 
     // Mirror the TTS "synthesizing" flag into local state so we can render
     // a top-right processing indicator while the engine prepares audio.

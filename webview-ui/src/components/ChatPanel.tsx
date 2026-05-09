@@ -788,7 +788,7 @@ export function ChatPanel({ isOpen, onToggle, onNarratorGenerationStart }: ChatP
                     rows={1}
                 />
                 <div className="chat-input-actions">
-                    <button
+                    {/* <button
                         className={`chat-voice-btn ${isRecording ? 'recording' : ''} ${isTranscribing ? 'transcribing' : ''}`}
                         onClick={toggleRecording}
                         title={isRecording ? 'Stop recording' : isTranscribing ? 'Transcribing…' : 'Voice input'}
@@ -798,7 +798,7 @@ export function ChatPanel({ isOpen, onToggle, onNarratorGenerationStart }: ChatP
                             ? <Icon name="spinner" spin />
                             : <Icon name={isRecording ? 'stopAction' : 'voiceInput'} />
                         }
-                    </button>
+                    </button> */}
                     <button
                         className="chat-send-btn"
                         onClick={() => sendMessage(input)}
