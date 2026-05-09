@@ -15,8 +15,11 @@
 import type { VoiceOption } from './voiceConfig';
 
 export const KOKORO_MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';
-/** q8 keeps the model under ~85 MB while preserving good audio quality. */
+/** q8 quantized ONNX — ~82 MB, used on CPU/WASM backend. */
 export const KOKORO_DTYPE = 'q8';
+/** q4f16 quantized ONNX — ~41 MB, int4 weights with fp16 accumulators.
+ *  Used on the WebGPU backend for lower latency GPU inference. */
+export const KOKORO_DTYPE_GPU = 'q4f16';
 
 export const KOKORO_VOICES: VoiceOption[] = [
     { id: 'af_alloy', label: 'Alloy', lang: 'en-US', description: 'American Female · Default', engine: 'kokoro' },

@@ -28,6 +28,14 @@ let readyPromise: Promise<void> | null = null;
 let activeInitProgress: ((p: KokoroInitProgress) => void) | null = null;
 let audioCtx: AudioContext | null = null;
 
+/** The inference backend the worker selected: 'webgpu' (GPU) or 'wasm' (CPU). */
+let kokoroDevice: 'webgpu' | 'wasm' = 'wasm';
+
+/** Returns the inference backend the Kokoro worker is using ('webgpu' or 'wasm'). */
+export function getKokoroDevice(): 'webgpu' | 'wasm' {
+    return kokoroDevice;
+}
+
 // Each speak() call gets a unique ID so chunks can be matched back.
 let nextId = 1;
 // The ID of the speak request currently being synthesised by the worker.
@@ -120,7 +128,7 @@ function emitSynthState(synthesizing: boolean): void {
 // ── Worker messaging ───────────────────────────────────────────────────────
 
 type WorkerOut =
-    | { type: 'ready' }
+    | { type: 'ready'; device?: 'webgpu' | 'wasm' }
     | { type: 'initProgress'; percent: number; stage: string; file?: string }
     | { type: 'warmed'; voice: string }
     | { type: 'chunk'; id: number; pcm: Float32Array; sampleRate: number }
@@ -300,6 +308,7 @@ export function initKokoro(onProgress?: (p: KokoroInitProgress) => void): Promis
                     }
                     if (ev.data.type === 'ready') {
                         ready = true;
+                        kokoroDevice = ev.data.device ?? 'wasm';
                         w.removeEventListener('message', onInitMsg);
                         w.addEventListener('message', onWorkerMessage);
                         activeInitProgress = null;

@@ -70,6 +70,26 @@ let stopFlag = 0;
 const warmedVoices = new Set<string>();
 const inflightWarm = new Map<string, Promise<void>>();
 
+/** The backend that successfully initialised the model. Sent in 'ready'. */
+let activeDevice: 'webgpu' | 'wasm' = 'wasm';
+
+/**
+ * Returns true if WebGPU is available in this worker context.
+ * Chromium (Electron) workers expose navigator.gpu; we probe for a real
+ * adapter so we can distinguish "API present" from "GPU actually usable".
+ */
+async function detectWebGPU(): Promise<boolean> {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const gpu = (navigator as any).gpu as { requestAdapter(): Promise<unknown | null> } | undefined;
+        if (!gpu) return false;
+        const adapter = await gpu.requestAdapter();
+        return adapter !== null;
+    } catch {
+        return false;
+    }
+}
+
 // HuggingFace base URL for all Kokoro model assets (config, tokenizer, ONNX, voices).
 // The fetch shim intercepts every request that starts with this prefix and
 // redirects it to the corresponding pre-bundled local asset in dist/kokoro-model/.
@@ -182,8 +202,7 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
         (env as unknown as { wasmPaths: unknown }).wasmPaths = wasmBase;
     }
 
-    // Load model — per-file byte progress maps to 0..90%.
-    const fileTotals = new Map<string, { loaded: number; total: number }>();
+    // ── Model loading — per-file byte progress maps to 0..90% ──────────────
     const LOAD_LO = 0, LOAD_HI = 90;
 
     type ProgressInfo =
@@ -193,44 +212,89 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
         | { status: 'done'; name: string; file: string }
         | { status: 'ready'; task?: string; model?: string };
 
-    const aggregate = (): number => {
-        let loaded = 0, total = 0, knownAny = false;
-        for (const v of fileTotals.values()) {
-            if (v.total > 0) { knownAny = true; loaded += v.loaded; total += v.total; }
-        }
-        if (!knownAny || total === 0) {
-            const entries = Array.from(fileTotals.values());
-            if (!entries.length) return 0;
-            return entries.filter(e => e.loaded > 0 && e.loaded === e.total).length / entries.length;
-        }
-        return loaded / total;
+    // Encapsulates one attempt to load the model with a given dtype/device.
+    // fileTotals is reset on each call so retry progress starts clean.
+    const loadModel = async (
+        dtype: string,
+        device: string,
+        label: string,
+    ): Promise<KokoroTTS> => {
+        const fileTotals = new Map<string, { loaded: number; total: number }>();
+        lastReportedPercent = -1;
+
+        const aggregate = (): number => {
+            let loaded = 0, total = 0, knownAny = false;
+            for (const v of fileTotals.values()) {
+                if (v.total > 0) { knownAny = true; loaded += v.loaded; total += v.total; }
+            }
+            if (!knownAny || total === 0) {
+                const entries = Array.from(fileTotals.values());
+                if (!entries.length) return 0;
+                return entries.filter(e => e.loaded > 0 && e.loaded === e.total).length / entries.length;
+            }
+            return loaded / total;
+        };
+
+        const loadPct = (frac: number) => LOAD_LO + (LOAD_HI - LOAD_LO) * Math.max(0, Math.min(1, frac));
+
+        const progressCallback = (info: ProgressInfo): void => {
+            if (info.status === 'initiate') {
+                if (!fileTotals.has(info.file)) fileTotals.set(info.file, { loaded: 0, total: 0 });
+                reportProgress(loadPct(aggregate()), label, info.file);
+            } else if (info.status === 'progress') {
+                fileTotals.set(info.file, { loaded: info.loaded ?? 0, total: info.total ?? 0 });
+                reportProgress(loadPct(aggregate()), label, info.file);
+            } else if (info.status === 'done') {
+                const cur = fileTotals.get(info.file);
+                fileTotals.set(info.file, { loaded: cur?.total || 1, total: cur?.total || 1 });
+                reportProgress(loadPct(aggregate()), label, info.file);
+            }
+        };
+
+        return KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
+            dtype,
+            device,
+            progress_callback: progressCallback as unknown as Parameters<typeof KokoroTTS.from_pretrained>[1] extends { progress_callback?: infer P } ? P : never,
+        });
     };
 
-    const loadPct = (frac: number) => LOAD_LO + (LOAD_HI - LOAD_LO) * Math.max(0, Math.min(1, frac));
+    // ── Backend selection: WebGPU first, CPU fallback ─────────────────────
+    //
+    // WebGPU (device: 'webgpu', dtype: 'q4f16'):
+    //   • Uses model_q4f16.onnx — int4 weights with fp16 accumulators (~41 MB).
+    //   • Runs entirely on the GPU: lower per-token latency than WASM/SIMD.
+    //   • Requires the model_q4f16.onnx asset; if it's missing (not yet
+    //     downloaded) or WebGPU adapter unavailable we fall through silently.
+    // WASM (device: 'wasm', dtype: 'q8'):
+    //   • Uses model_quantized.onnx — q8 quantized (~82 MB). Always present.
+    //   • Multi-threaded SIMD, proven offline path.
 
-    const progressCallback = (info: ProgressInfo): void => {
-        if (info.status === 'initiate') {
-            if (!fileTotals.has(info.file)) fileTotals.set(info.file, { loaded: 0, total: 0 });
-            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
-        } else if (info.status === 'progress') {
-            fileTotals.set(info.file, { loaded: info.loaded ?? 0, total: info.total ?? 0 });
-            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
-        } else if (info.status === 'done') {
-            const cur = fileTotals.get(info.file);
-            fileTotals.set(info.file, { loaded: cur?.total || 1, total: cur?.total || 1 });
-            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
+    reportProgress(0, 'Detecting hardware backend');
+    const gpuAvailable = await detectWebGPU();
+
+    if (gpuAvailable) {
+        reportProgress(0, 'Loading neural model (GPU)');
+        try {
+            tts = await loadModel('q4f16', 'webgpu', 'Loading neural model (GPU)');
+            activeDevice = 'webgpu';
+        } catch {
+            // WebGPU model failed — most likely model_q4f16.onnx is not yet
+            // downloaded. Fall through to the WASM/CPU path silently.
+            tts = null;
+            lastReportedPercent = -1;
         }
-    };
+    }
 
-    reportProgress(0, 'Loading Kokoro TTS engine');
-    tts = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
-        dtype: 'q8',
-        device: 'wasm',
-        progress_callback: progressCallback as unknown as Parameters<typeof KokoroTTS.from_pretrained>[1] extends { progress_callback?: infer P } ? P : never,
-    });
-    reportProgress(LOAD_HI, 'Neural model loaded');
+    if (!tts) {
+        reportProgress(0, 'Loading neural model (CPU)');
+        tts = await loadModel('q8', 'wasm', 'Loading neural model (CPU)');
+        activeDevice = 'wasm';
+    }
+
+    reportProgress(LOAD_HI, `Neural model loaded (${activeDevice === 'webgpu' ? 'GPU' : 'CPU'})`);
 
     // Warm default voice — JIT-compiles the ONNX graph + espeak WASM.
+    // This happens exactly once per worker lifetime.
     reportProgress(90, 'Warming default voice');
     await warmVoice('af_alloy');
     reportProgress(100, 'Voice engine ready');
@@ -388,7 +452,7 @@ self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
     try {
         if (msg.type === 'init') {
             await init(msg.modelBase, msg.ortBase);
-            post({ type: 'ready' });
+            post({ type: 'ready', device: activeDevice });
         } else if (msg.type === 'warm') {
             await warmVoice(msg.voice);
             post({ type: 'warmed', voice: msg.voice });

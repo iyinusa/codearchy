@@ -25,7 +25,12 @@ const MODEL_FILES = [
     'config.json',
     'tokenizer.json',
     'tokenizer_config.json',
+    // CPU/WASM backend (always required, ~82 MB q8 quantized).
     'onnx/model_quantized.onnx',
+    // WebGPU backend — int4 weights with fp16 accumulators, ~41 MB.
+    // Used automatically when the browser/Electron reports WebGPU support.
+    // Smaller than q8 and runs directly on the GPU for lower latency.
+    'onnx/model_q4f16.onnx',
 ];
 
 // All English voices bundled with kokoro-js (American + British, F + M).
