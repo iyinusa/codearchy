@@ -269,20 +269,50 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
     //   • Uses model_quantized.onnx — q8 quantized (~82 MB). Always present.
     //   • Multi-threaded SIMD, proven offline path.
 
-    // Always use the WASM/CPU path with the q8 model (model_quantized.onnx).
-    // WebGPU was trialled but:
-    //   • q4f16 + webgpu produces garbled / Chinese-sounding audio (4-bit
-    //     quantisation loss is too severe for StyleTTS2).
-    //   • q8 + webgpu fails silently — ORT’s WebGPU EP is FP32/FP16 native;
-    //     INT8 ONNX either doesn’t load or produces no audio.
-    //   • fp32 + webgpu (official recommendation) requires a separate
-    //     model.onnx file (∼ 330 MB) that is not bundled.
-    // WASM q8 is stable, confirmed working, and already bundled.
-    reportProgress(0, 'Loading neural model');
-    tts = await loadModel('q8', 'wasm', 'Loading neural model');
-    activeDevice = 'wasm';
+    // ── Backend selection ─────────────────────────────────────────────────
+    //
+    // Priority 1: WebGPU + fp32 (model.onnx, ~330 MB)
+    //   The officially recommended WebGPU configuration in transformers.js.
+    //   All tensor ops are native FP32 on GPU → 3–5× faster than WASM.
+    //   Tried and rejected alternatives:
+    //     q4f16 + webgpu: ORT WebGPU EP doesn't reliably handle MatMulNBits
+    //       (INT4) → silently falls to WASM with broken f16 emulation →
+    //       garbled / Chinese-sounding audio output.
+    //     q8 + webgpu: ORT WebGPU EP is FP32/FP16 native; INT8 ops are
+    //       unsupported → inference produces nothing.
+    //   Fails gracefully when model.onnx is absent (404 from local server)
+    //   → the catch block discards the error and tries WASM below.
+    //   To enable GPU: run `node scripts/download-kokoro.js` which downloads
+    //   model.onnx into webview-ui/dist/kokoro-model/.
+    //
+    // Priority 2: WASM + q8 (model_quantized.onnx, ~88 MB)
+    //   Always available; correct audio; used when WebGPU is unavailable
+    //   or model.onnx has not been downloaded yet.
 
-    reportProgress(LOAD_HI, 'Neural model loaded');
+    reportProgress(0, 'Detecting hardware backend');
+    const gpuAvailable = await detectWebGPU();
+
+    if (gpuAvailable) {
+        reportProgress(0, 'Loading neural model (GPU)');
+        try {
+            tts = await loadModel('fp32', 'webgpu', 'Loading neural model (GPU)');
+            activeDevice = 'webgpu';
+        } catch {
+            // Most likely cause: model.onnx not downloaded yet (HTTP 404 from
+            // local model server).  Run download-kokoro.js to enable GPU mode.
+            // Falls through to WASM below.
+            tts = null;
+            lastReportedPercent = -1;
+        }
+    }
+
+    if (!tts) {
+        reportProgress(0, 'Loading neural model (CPU)');
+        tts = await loadModel('q8', 'wasm', 'Loading neural model (CPU)');
+        activeDevice = 'wasm';
+    }
+
+    reportProgress(LOAD_HI, `Neural model loaded (${activeDevice === 'webgpu' ? 'GPU' : 'CPU'})`);
 
     // Warm default voice — JIT-compiles the ONNX graph + espeak WASM.
     // This happens exactly once per worker lifetime.
