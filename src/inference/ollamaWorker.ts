@@ -321,6 +321,10 @@ function handleHttpDelete(req: Extract<WorkerRequest, { op: 'httpDelete' }>): vo
     const { id, model } = req;
     const body = JSON.stringify({ model });
     const url = new URL(`${OLLAMA_BASE}/api/delete`);
+    // Ollama deletes the model blob files from disk — for large models (9–18 GB)
+    // this can take well over 15 s on spinning disks or network storage.
+    // Use 120 s to give the OS enough time to unlink the files.
+    const TIMEOUT_MS = 120_000;
     const opts: http.RequestOptions = {
         hostname: url.hostname,
         port: url.port,
@@ -330,23 +334,28 @@ function handleHttpDelete(req: Extract<WorkerRequest, { op: 'httpDelete' }>): vo
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(body),
         },
-        timeout: 15000,
+        timeout: TIMEOUT_MS,
     };
     let data = '';
     const r = http.request(opts, (res) => {
         res.setEncoding('utf-8');
         res.on('data', (c: string) => { data += c; });
         res.on('end', () => {
-            if (res.statusCode !== 200) {
-                send({ id, type: 'error', message: `Ollama delete returned status ${res.statusCode}: ${data}` });
-            } else {
+            // Ollama returns 200 with empty body on success;
+            // some builds return 204 No Content — treat both as success.
+            if (res.statusCode === 200 || res.statusCode === 204) {
                 send({ id, type: 'result', data: 'deleted' });
+            } else {
+                send({ id, type: 'error', message: `Ollama delete returned status ${res.statusCode}: ${data}` });
             }
         });
         res.on('error', (e) => send({ id, type: 'error', message: e.message }));
     });
     r.on('error', (e) => send({ id, type: 'error', message: `Cannot connect to Ollama: ${e.message}` }));
-    r.on('timeout', () => { r.destroy(); send({ id, type: 'error', message: 'Delete request timed out' }); });
+    r.on('timeout', () => {
+        r.destroy();
+        send({ id, type: 'error', message: 'Model removal timed out after 120 s. The model files may still be on disk — try restarting Ollama and retrying.' });
+    });
     r.write(body);
     r.end();
 }

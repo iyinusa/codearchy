@@ -1283,12 +1283,22 @@ body {
 .model-card.pulling,
 .model-card.deleting {
     cursor: default;
-    pointer-events: none;
+    /* Do NOT set pointer-events:none here — that would block the cancel button.
+       The card onClick handler already guards against isPulling/isDeleting. */
 }
 
 .model-card.pulling .model-card-header,
 .model-card.deleting .model-card-header {
     opacity: 0.7;
+}
+
+/* Keep card body non-interactive except for explicit action buttons */
+.model-card.pulling .model-desc,
+.model-card.pulling .model-specs,
+.model-card.deleting .model-desc,
+.model-card.deleting .model-specs {
+    pointer-events: none;
+    user-select: none;
 }
 
 
