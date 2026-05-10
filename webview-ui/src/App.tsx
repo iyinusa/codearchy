@@ -16,7 +16,6 @@ import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
 import { subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId, startKokoroEngine } from './voice/ttsManager';
-import { getVoiceConfig } from './voice/voiceConfig';
 import {
     setProjectId,
     getProjectId,
@@ -79,13 +78,16 @@ export function App() {
         }
     }, [archStream]);
 
-    // Auto-boot Kokoro on mount if the user previously selected it as their
-    // engine. This means activation is a one-time choice — the engine starts
-    // silently in the background on every subsequent webview load.
+    // Pre-load Kokoro eagerly in the background on every webview mount.
+    // The model is pre-bundled with the extension so no internet is needed.
+    // Using a short delay so the initial render and graph data load complete
+    // before the worker thread starts pulling the ONNX into memory.
+    // After the first activation browser-level caching makes reloads near-instant.
     useEffect(() => {
-        if (getVoiceConfig().engine === 'kokoro') {
+        const timer = window.setTimeout(() => {
             void startKokoroEngine().catch(() => undefined);
-        }
+        }, 1500);
+        return () => window.clearTimeout(timer);
     }, []);
 
     // Mirror the TTS "synthesizing" flag into local state so we can render

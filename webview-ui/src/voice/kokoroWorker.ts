@@ -269,29 +269,20 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
     //   • Uses model_quantized.onnx — q8 quantized (~82 MB). Always present.
     //   • Multi-threaded SIMD, proven offline path.
 
-    reportProgress(0, 'Detecting hardware backend');
-    const gpuAvailable = await detectWebGPU();
+    // Always use the WASM/CPU path with the q8 model (model_quantized.onnx).
+    // WebGPU was trialled but:
+    //   • q4f16 + webgpu produces garbled / Chinese-sounding audio (4-bit
+    //     quantisation loss is too severe for StyleTTS2).
+    //   • q8 + webgpu fails silently — ORT’s WebGPU EP is FP32/FP16 native;
+    //     INT8 ONNX either doesn’t load or produces no audio.
+    //   • fp32 + webgpu (official recommendation) requires a separate
+    //     model.onnx file (∼ 330 MB) that is not bundled.
+    // WASM q8 is stable, confirmed working, and already bundled.
+    reportProgress(0, 'Loading neural model');
+    tts = await loadModel('q8', 'wasm', 'Loading neural model');
+    activeDevice = 'wasm';
 
-    if (gpuAvailable) {
-        reportProgress(0, 'Loading neural model (GPU)');
-        try {
-            tts = await loadModel('q4f16', 'webgpu', 'Loading neural model (GPU)');
-            activeDevice = 'webgpu';
-        } catch {
-            // WebGPU model failed — most likely model_q4f16.onnx is not yet
-            // downloaded. Fall through to the WASM/CPU path silently.
-            tts = null;
-            lastReportedPercent = -1;
-        }
-    }
-
-    if (!tts) {
-        reportProgress(0, 'Loading neural model (CPU)');
-        tts = await loadModel('q8', 'wasm', 'Loading neural model (CPU)');
-        activeDevice = 'wasm';
-    }
-
-    reportProgress(LOAD_HI, `Neural model loaded (${activeDevice === 'webgpu' ? 'GPU' : 'CPU'})`);
+    reportProgress(LOAD_HI, 'Neural model loaded');
 
     // Warm default voice — JIT-compiles the ONNX graph + espeak WASM.
     // This happens exactly once per worker lifetime.

@@ -467,16 +467,34 @@ export class ArchitecturePanel {
 
       this.panel.webview.postMessage({
         type: WebviewMessageType.SystemArchProgress,
-        payload: { message: `Analyzing codebase with ${modelOpt.label}... This may take a moment.` },
+        payload: { message: `Analyzing codebase with ${modelOpt.label}…` },
       });
+
+      // Escalate the progress message if Gemma is cold-loading its weights
+      // and hasn't emitted a first chunk within 600 ms.
+      let firstArchChunk = false;
+      const archHintTimer = setTimeout(() => {
+        if (!firstArchChunk) {
+          this.panel.webview.postMessage({
+            type: WebviewMessageType.SystemArchProgress,
+            payload: { message: 'AI processing, please wait…' },
+          });
+        }
+      }, 600);
 
       const architecture = await this.ollamaService.generateSystemArchitecture(
         this.currentGraph,
         modelOpt.ollamaTag,
         (chunk) => {
-          // Stream the raw model output so the user sees progress instead of
-          // a static "Generating..." message. Perceived latency is half the
-          // battle when waiting on a local LLM.
+          if (!firstArchChunk) {
+            firstArchChunk = true;
+            clearTimeout(archHintTimer);
+            // Switch to a "generating" message once tokens are flowing.
+            this.panel.webview.postMessage({
+              type: WebviewMessageType.SystemArchProgress,
+              payload: { message: `Generating architecture with ${modelOpt.label}…` },
+            });
+          }
           this.panel.webview.postMessage({
             type: WebviewMessageType.SystemArchStream,
             payload: { chunk },
@@ -484,6 +502,7 @@ export class ArchitecturePanel {
         },
         this.processingMode
       );
+      clearTimeout(archHintTimer);
 
       this.currentSystemArch = architecture;
 
@@ -712,9 +731,31 @@ export class ArchitecturePanel {
       return;
     }
 
+    // Signal "thinking" immediately — before any network round-trip (including
+    // the isAvailable() check below) so the spinner appears the instant the
+    // user sends a message.
+    this.panel.webview.postMessage({
+      type: WebviewMessageType.ChatThinking,
+      payload: { content: '' },
+    });
+
+    // If Gemma is cold-loading its model weights, the first token can take
+    // many seconds.  Escalate the hint after a short delay so the user knows
+    // the request is in-flight rather than frozen.
+    let firstChunkReceived = false;
+    const loadingHintTimer = setTimeout(() => {
+      if (!firstChunkReceived) {
+        this.panel.webview.postMessage({
+          type: WebviewMessageType.ChatThinking,
+          payload: { content: 'AI Processing, please wait…' },
+        });
+      }
+    }, 600);
+
     try {
       const available = await this.ollamaService.isAvailable();
       if (!available) {
+        clearTimeout(loadingHintTimer);
         this.panel.webview.postMessage({
           type: WebviewMessageType.ChatResponse,
           payload: { content: '', error: 'Cannot connect to Ollama. Make sure it\'s running.' },
@@ -725,19 +766,6 @@ export class ArchitecturePanel {
       // Set architecture context for chat (both graph + system arch)
       this.ollamaService.setArchitectureContext(this.currentGraph, this.processingMode);
       this.ollamaService.setSystemArchitecture(this.currentSystemArch);
-
-      // If Gemma is cold-loading its model weights, the first token can take
-      // many seconds.  Show a hint in the thinking bubble after a short delay
-      // so the user knows the request is in-flight rather than frozen.
-      let firstChunkReceived = false;
-      const loadingHintTimer = setTimeout(() => {
-        if (!firstChunkReceived) {
-          this.panel.webview.postMessage({
-            type: WebviewMessageType.ChatThinking,
-            payload: { content: 'Loading model into memory, please wait…' },
-          });
-        }
-      }, 3000);
 
       const response = await this.ollamaService.chat(
         content,
@@ -878,11 +906,17 @@ export class ArchitecturePanel {
       if (!stat.isFile()) { res.writeHead(404); res.end(); return; }
 
       const ext = path.extname(filePath).toLowerCase();
+      // Large immutable assets (ONNX models, WASM binaries, voice .bin files)
+      // are cached aggressively so subsequent Kokoro activations skip disk I/O
+      // and load from Chromium's in-memory/disk cache — dramatically faster.
+      // Config / tokenizer JSON files use no-cache so extension updates are
+      // picked up without users needing to clear their cache.
+      const isImmutableAsset = ['.onnx', '.wasm', '.bin'].includes(ext);
       res.writeHead(200, {
         'Content-Type': MIME[ext] ?? 'application/octet-stream',
         'Content-Length': stat.size,
         'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'no-store',
+        'Cache-Control': isImmutableAsset ? 'public, max-age=3600, immutable' : 'no-cache',
       });
       fs.createReadStream(filePath).pipe(res);
     });

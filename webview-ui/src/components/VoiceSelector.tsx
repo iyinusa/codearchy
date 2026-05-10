@@ -46,6 +46,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
     const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
     const [activeEngine, setActiveEngine] = useState<VoiceEngineId>(config.engine);
 
+
     useEffect(() => subscribeVoiceConfig(setConfig), []);
     useEffect(() => subscribeWebSpeechVoices(setWebVoices), []);
     useEffect(() => subscribeSpeaking((sp) => { if (!sp) setTestingVoiceId(null); }), []);
@@ -101,12 +102,21 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
 
         setTestingVoiceId(option.id);
         const prev = getVoiceConfig();
+        // Set voice config so speak() picks up the correct voice + engine.
         setVoiceConfig({ engine: option.engine, voiceId: option.id });
         try {
+            // Use speak() for both engines. For Kokoro, speak() calls kokoroSpeak()
+            // synchronously — BEFORE any await — which calls ctx.resume() while
+            // still inside the button-click user-gesture stack. This is the only
+            // reliable way to unlock Electron’s AudioContext autoplay policy:
+            // calling resume() after an await (as the generate path did) causes
+            // Electron to ignore it silently, yielding synthesis with no audio.
             await speak(previewText, {
                 onEnd: () => setTestingVoiceId(null),
                 onError: () => setTestingVoiceId(null),
             });
+        } catch {
+            setTestingVoiceId(null);
         } finally {
             if (prev.voiceId !== option.id || prev.engine !== option.engine) {
                 setVoiceConfig({ engine: prev.engine, voiceId: prev.voiceId });
@@ -229,10 +239,10 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 ) : (
                     <div className="voice-section">
                         <p className="voice-section-desc">
-                            Kokoro-82M is pre-bundled with the extension. Click
-                            <strong> Activate</strong> — the engine loads the local model files
-                            (or downloads them on first run if missing) then warms up
-                            inference for instant speech. All processing happens on your machine.
+                            Kokoro-82M is pre-bundled with the extension and loads automatically
+                            in the background. The first load reads the local model files
+                            (~82 MB ONNX) into memory — subsequent activations are near-instant
+                            thanks to caching. All processing happens on your machine, fully offline.
                             <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 sec to process paragraph). Still in BETA stage.</p>
                         </p>
 
@@ -241,11 +251,10 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                 <div className="kokoro-activate-header">
                                     <Icon name="aiMagic" />
                                     <div>
-                                        <h3>Activate neural voice engine</h3>
+                                        <h3>Neural voice engine starting…</h3>
                                         <p>
-                                            Loads the local Kokoro-82M model — or downloads it from
-                                            HuggingFace if not yet bundled — then caches it for
-                                            fully offline use. No telemetry, no cloud.
+                                            Kokoro loads automatically. Click below if it
+                                            hasn't started yet — or if a previous attempt failed.
                                         </p>
                                     </div>
                                 </div>
@@ -258,7 +267,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                     className="kokoro-activate-btn"
                                     onClick={handleActivateKokoro}
                                 >
-                                    <Icon name="play" /> Activate Kokoro
+                                    <Icon name="play" /> Start Kokoro
                                 </button>
                             </div>
                         )}
