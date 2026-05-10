@@ -165,6 +165,16 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
     // modelBase is now http://127.0.0.1:PORT/kokoro-model/onnx-community/…
     installFetchShim(modelBase);
 
+    // Clear the kokoro-js voice Cache API so stale or error responses from
+    // previous sessions (e.g. 404s from when the model server wasn't ready)
+    // don't shadow the local voice files.  kokoro-js caches voice .bin
+    // responses under "kokoro-voices" WITHOUT checking response.ok, so any
+    // error response gets stored and returned on the next session — bypassing
+    // our fetch shim entirely.  Clearing on every init is cheap: voice files
+    // are 522 KB each and are served from localhost (model server), so the
+    // re-fetch is nearly instantaneous.
+    try { await caches.delete('kokoro-voices'); } catch { /* ignore — caches may not be available */ }
+
     // ── Configure transformers.js for offline operation. ───────────────────
     //
     // transformers.js builds its normal HuggingFace URLs and calls fetch().
@@ -332,8 +342,10 @@ async function warmVoice(voice: string): Promise<void> {
             type GenOpts = NonNullable<Parameters<KokoroTTS['generate']>[1]>;
             await tts!.generate('Hi.', { voice } as unknown as GenOpts);
             warmedVoices.add(voice);
-        } catch {
-            // Voice file missing from bundle — swallow; speak() will surface it.
+        } catch (err) {
+            // Voice warm failed — log so devtools shows the root cause.
+            // speak() will attempt synthesis anyway and surface any error there.
+            console.warn(`[kokoro] warmVoice(${voice}) failed:`, err);
         } finally {
             inflightWarm.delete(voice);
         }
