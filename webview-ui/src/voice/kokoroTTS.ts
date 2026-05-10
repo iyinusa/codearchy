@@ -28,6 +28,14 @@ let readyPromise: Promise<void> | null = null;
 let activeInitProgress: ((p: KokoroInitProgress) => void) | null = null;
 let audioCtx: AudioContext | null = null;
 
+/** The inference backend the worker selected: 'webgpu' (GPU) or 'wasm' (CPU). */
+let kokoroDevice: 'webgpu' | 'wasm' = 'wasm';
+
+/** Returns the inference backend the Kokoro worker is using ('webgpu' or 'wasm'). */
+export function getKokoroDevice(): 'webgpu' | 'wasm' {
+    return kokoroDevice;
+}
+
 // Each speak() call gets a unique ID so chunks can be matched back.
 let nextId = 1;
 // The ID of the speak request currently being synthesised by the worker.
@@ -59,10 +67,30 @@ const activeSources = new Set<AudioBufferSourceNode>();
 // Chain of PCM playback promises for the active speak — gapless streaming.
 let playChain: Promise<void> = Promise.resolve();
 let stopFlag = 0;
+// Tracks the AudioContext time at which the last pre-scheduled buffer will end.
+// Used by playPcm() to schedule each new chunk immediately after the previous
+// one — achieving true gapless playback without relying on JS microtask timing.
+let scheduledEndTime = 0;
 
 // Track which voices the worker has already warmed so we don't request the
 // same warm twice. Worker echoes a 'warmed' ack so this stays in sync.
 const warmedVoices = new Set<string>();
+
+// Subscribers notified whenever a new voice becomes warmed.
+const warmedVoiceListeners = new Set<(voice: string) => void>();
+
+/** Subscribe to voice-warm completion events.
+ *  Listener fires once per voice, with the voice id, as the worker finishes
+ *  background warming.  Returns an unsubscribe function. */
+export function subscribeVoiceWarmed(listener: (voice: string) => void): () => void {
+    warmedVoiceListeners.add(listener);
+    return () => { warmedVoiceListeners.delete(listener); };
+}
+
+/** Snapshot of all voices currently warmed in the worker. */
+export function getWarmedVoices(): ReadonlySet<string> {
+    return warmedVoices;
+}
 
 // ── Generate (cache-prefill) state ─────────────────────────────────────────
 //
@@ -91,6 +119,14 @@ function getAudioCtx(): AudioContext {
 async function playPcm(pcm: Float32Array, sampleRate: number, myStop: number): Promise<void> {
     if (stopFlag !== myStop) return;
     const ctx = getAudioCtx();
+    // In VS Code's Electron webview the AudioContext may start in 'suspended'
+    // state. We must AWAIT resume() — not just call it — so audio is actually
+    // scheduled on a running context. Without this, source.onended never fires
+    // in a packaged extension and the speak Promise hangs indefinitely.
+    if (ctx.state !== 'running') {
+        try { await ctx.resume(); } catch { /* ignore — context may be irreparably closed */ }
+    }
+    if (stopFlag !== myStop) return;
     return new Promise<void>((resolve) => {
         const buffer = ctx.createBuffer(1, pcm.length, sampleRate);
         buffer.getChannelData(0).set(pcm);
@@ -98,12 +134,40 @@ async function playPcm(pcm: Float32Array, sampleRate: number, myStop: number): P
         source.buffer = buffer;
         source.connect(ctx.destination);
         activeSources.add(source);
+        // Pre-schedule this chunk on the AudioContext timeline so it starts
+        // exactly when the previous chunk ends. Without this, the JS microtask
+        // overhead between onended → Promise.resolve() → next source.start()
+        // creates an audible pop/click at every sentence boundary. By scheduling
+        // ahead on the audio thread, gapless playback is guaranteed regardless
+        // of how long the event loop takes to process each chunk.
+        const startTime = Math.max(ctx.currentTime, scheduledEndTime);
+        scheduledEndTime = startTime + buffer.duration;
+        // Guard: fires if onended never fires (context permanently suspended).
+        // Window = time until the scheduled buffer finishes + 2 s safety margin.
+        const msUntilEnd = Math.max(0, (scheduledEndTime - ctx.currentTime) * 1000);
+        const guard = window.setTimeout(() => {
+            if (activeSources.has(source)) {
+                activeSources.delete(source);
+                try { source.disconnect(); } catch { /* ignore */ }
+            }
+            resolve();
+        }, msUntilEnd + 2000);
         source.onended = () => {
+            window.clearTimeout(guard);
             activeSources.delete(source);
             source.disconnect();
             resolve();
         };
-        source.start();
+        try {
+            source.start(startTime);
+        } catch {
+            // Context closed or invalid state — resolve immediately so the
+            // playChain does not hang blocking remaining chunks.
+            window.clearTimeout(guard);
+            activeSources.delete(source);
+            try { source.disconnect(); } catch { /* ignore */ }
+            resolve();
+        }
     });
 }
 
@@ -120,7 +184,7 @@ function emitSynthState(synthesizing: boolean): void {
 // ── Worker messaging ───────────────────────────────────────────────────────
 
 type WorkerOut =
-    | { type: 'ready' }
+    | { type: 'ready'; device?: 'webgpu' | 'wasm' }
     | { type: 'initProgress'; percent: number; stage: string; file?: string }
     | { type: 'warmed'; voice: string }
     | { type: 'chunk'; id: number; pcm: Float32Array; sampleRate: number }
@@ -165,6 +229,7 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
 
     if (msg.type === 'warmed') {
         warmedVoices.add(msg.voice);
+        warmedVoiceListeners.forEach(l => { try { l(msg.voice); } catch { /* ignore */ } });
         return;
     }
 
@@ -248,6 +313,7 @@ function flushQueued(): void {
     activeSynthState = null;
     pendingPlayCount = 0;
     endReceived = false;
+    scheduledEndTime = 0;
     playChain = Promise.resolve();
     // We are about to send the speak request — caller's UI should reflect a
     // synthesizing state until the first chunk plays.
@@ -300,6 +366,7 @@ export function initKokoro(onProgress?: (p: KokoroInitProgress) => void): Promis
                     }
                     if (ev.data.type === 'ready') {
                         ready = true;
+                        kokoroDevice = ev.data.device ?? 'wasm';
                         w.removeEventListener('message', onInitMsg);
                         w.addEventListener('message', onWorkerMessage);
                         activeInitProgress = null;
@@ -307,6 +374,9 @@ export function initKokoro(onProgress?: (p: KokoroInitProgress) => void): Promis
                     } else if (ev.data.type === 'error') {
                         w.removeEventListener('message', onInitMsg);
                         activeInitProgress = null;
+                        // Reset so a subsequent startKokoroEngine() call can retry
+                        // from scratch rather than returning the already-rejected Promise.
+                        readyPromise = null;
                         reject(new Error(ev.data.message));
                     }
                 };
@@ -375,6 +445,7 @@ export function kokoroSpeak(text: string, options: KokoroSpeakOptions = {}): Pro
             activeSynthState = null;
             pendingPlayCount = 0;
             endReceived = false;
+            scheduledEndTime = 0;
             playChain = Promise.resolve();
             // We're about to start synthesising — tell the caller.
             emitSynthState(true);
@@ -396,6 +467,7 @@ export function kokoroStop(): void {
     activeSynthState = null;
     pendingPlayCount = 0;
     endReceived = false;
+    scheduledEndTime = 0;
     playChain = Promise.resolve();
     // Silence audio that is currently playing or scheduled. BufferSource
     // playback can ONLY be interrupted via source.stop() — without this,
@@ -459,6 +531,26 @@ export function kokoroGenerate(
 
 // ── Cached PCM playback ────────────────────────────────────────────────────
 
+/**
+ * Prime the AudioContext during a user-gesture call stack so that a
+ * subsequent playKokoroPcm() call (which may run after an async await)
+ * finds the context already in 'running' state.
+ *
+ * Electron's autoplay policy requires resume() to be called synchronously
+ * within a user-gesture handler. If we only call resume() after an await
+ * (e.g. after synthesis completes), the gesture stack has expired and
+ * Electron silently keeps the context suspended → no audio, no onended.
+ *
+ * Call this SYNCHRONOUSLY (no await) at the very start of any click handler
+ * that will later play audio after an async gap.
+ */
+export function primeAudioContext(): void {
+    const ctx = getAudioCtx();
+    if (ctx.state !== 'running') {
+        ctx.resume().catch(() => { /* ignore — will retry in playKokoroPcm */ });
+    }
+}
+
 export interface KokoroPlayOptions {
     onEnd?: () => void;
     onError?: (err: unknown) => void;
@@ -472,7 +564,7 @@ export interface KokoroPlayOptions {
  * Resolves once playback finishes (or is interrupted via stop). Does NOT
  * touch the worker — synthesis already happened.
  */
-export function playKokoroPcm(
+export async function playKokoroPcm(
     pcm: Float32Array,
     sampleRate: number,
     options: KokoroPlayOptions = {},
@@ -482,8 +574,10 @@ export function playKokoroPcm(
     // queued speak waiting on the active id.
     kokoroStop();
     const ctx = getAudioCtx();
+    // Await resume() so the context is definitely running before we schedule
+    // audio — the same fix applied to playPcm() for packaged-extension compat.
     if (ctx.state !== 'running') {
-        ctx.resume().catch(() => { /* ignore — gesture may have lapsed */ });
+        try { await ctx.resume(); } catch { /* ignore — gesture may have lapsed */ }
     }
     const myStop = stopFlag;
     return new Promise<void>((resolve) => {
@@ -504,6 +598,7 @@ export function playKokoroPcm(
         const finish = (interrupted: boolean) => {
             if (finished) return;
             finished = true;
+            window.clearTimeout(guard);
             activeSources.delete(source);
             try { source.disconnect(); } catch { /* ignore */ }
             // Only fire onEnd when WE were the active playback at start —
@@ -511,6 +606,12 @@ export function playKokoroPcm(
             if (!interrupted && stopFlag === myStop) options.onEnd?.();
             resolve();
         };
+        // Safety guard: if source.onended never fires (AudioContext permanently
+        // suspended despite resume() — can happen in Electron packaged extension
+        // if resume() was called outside a user gesture), unblock after the
+        // buffer's natural duration plus a 2 s safety margin.
+        const durationMs = Math.ceil((pcm.length / sampleRate) * 1000);
+        const guard = window.setTimeout(() => finish(true), durationMs + 2000);
         source.onended = () => finish(stopFlag !== myStop);
         try {
             source.start();

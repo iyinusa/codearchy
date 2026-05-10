@@ -22,6 +22,8 @@ import {
     subscribeWebSpeechVoices,
     subscribeSpeaking,
     subscribeKokoroStatus,
+    subscribeVoiceWarmed,
+    getWarmedKokoroVoices,
     startKokoroEngine,
 } from '../voice/ttsManager';
 
@@ -45,6 +47,14 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
     });
     const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
     const [activeEngine, setActiveEngine] = useState<VoiceEngineId>(config.engine);
+    // Tracks which Kokoro voices are warmed in the worker.  Starts with the
+    // current snapshot so voices already warmed before the modal opened show
+    // immediately as ready; new voices are added one by one as 'warmed' events
+    // arrive from the background warm loop.
+    const [kokoroWarmed, setKokoroWarmed] = useState<Set<string>>(
+        () => new Set(getWarmedKokoroVoices()),
+    );
+
 
     useEffect(() => subscribeVoiceConfig(setConfig), []);
     useEffect(() => subscribeWebSpeechVoices(setWebVoices), []);
@@ -58,6 +68,15 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
             file: s.file,
         }),
     ), []);
+    // Add each newly-warmed voice to the set so voice cards enable in real time.
+    useEffect(() => subscribeVoiceWarmed((voice) => {
+        setKokoroWarmed(prev => {
+            if (prev.has(voice)) return prev; // no change — skip re-render
+            const next = new Set(prev);
+            next.add(voice);
+            return next;
+        });
+    }), []);
 
     // Stop any test speech when the modal closes.
     useEffect(() => () => stopSpeaking(), []);
@@ -86,10 +105,11 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
 
     const handleSelectVoice = (option: VoiceOption) => {
         if (option.engine === 'kokoro' && kokoroState.status !== 'ready') return;
+        if (option.engine === 'kokoro' && !kokoroWarmed.has(option.id)) return;
         setVoiceConfig({ engine: option.engine, voiceId: option.id });
     };
 
-    const previewText = "Hello, I'm your voice explainer, ready to narrate your system architecture.";
+    const previewText = "Hello, I'm your voice explainer, ready to narrate your code architecture.";
 
     const handleTest = useCallback(async (option: VoiceOption) => {
         if (testingVoiceId === option.id) {
@@ -98,21 +118,31 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
             return;
         }
         if (option.engine === 'kokoro' && kokoroState.status !== 'ready') return;
+        if (option.engine === 'kokoro' && !kokoroWarmed.has(option.id)) return;
 
         setTestingVoiceId(option.id);
         const prev = getVoiceConfig();
+        // Set voice config so speak() picks up the correct voice + engine.
         setVoiceConfig({ engine: option.engine, voiceId: option.id });
         try {
+            // Use speak() for both engines. For Kokoro, speak() calls kokoroSpeak()
+            // synchronously — BEFORE any await — which calls ctx.resume() while
+            // still inside the button-click user-gesture stack. This is the only
+            // reliable way to unlock Electron’s AudioContext autoplay policy:
+            // calling resume() after an await (as the generate path did) causes
+            // Electron to ignore it silently, yielding synthesis with no audio.
             await speak(previewText, {
                 onEnd: () => setTestingVoiceId(null),
                 onError: () => setTestingVoiceId(null),
             });
+        } catch {
+            setTestingVoiceId(null);
         } finally {
             if (prev.voiceId !== option.id || prev.engine !== option.engine) {
                 setVoiceConfig({ engine: prev.engine, voiceId: prev.voiceId });
             }
         }
-    }, [testingVoiceId, kokoroState.status]);
+    }, [testingVoiceId, kokoroState.status, kokoroWarmed]);
 
     // Auto-default the Kokoro voice once the engine becomes ready and the
     // user is on the Kokoro tab without a Kokoro voice selected.
@@ -127,7 +157,8 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
 
     const renderVoiceList = (engine: VoiceEngineId) => {
         const list: VoiceOption[] = engine === 'kokoro' ? KOKORO_VOICES : webVoiceOptions;
-        const disabled = engine === 'kokoro' && kokoroState.status !== 'ready';
+        // Engine not yet ready (loading / idle / error) — all cards disabled.
+        const engineNotReady = engine === 'kokoro' && kokoroState.status !== 'ready';
 
         if (list.length === 0) {
             return (
@@ -143,16 +174,28 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 {list.map((option) => {
                     const selected = config.engine === engine && config.voiceId === option.id;
                     const testing = testingVoiceId === option.id;
+                    // A Kokoro voice is "warming" when the engine is ready but the
+                    // worker hasn't finished the background warm inference for it yet.
+                    const warming = engine === 'kokoro'
+                        && kokoroState.status === 'ready'
+                        && !kokoroWarmed.has(option.id);
+                    const isDisabled = engineNotReady || warming;
                     return (
                         <div
                             key={`${engine}-${option.id}`}
-                            className={`voice-card ${selected ? 'selected' : ''} ${disabled ? 'disabled' : ''}`}
-                            onClick={() => !disabled && handleSelectVoice(option)}
+                            className={[
+                                'voice-card',
+                                selected ? 'selected' : '',
+                                isDisabled ? 'disabled' : '',
+                                warming ? 'warming' : '',
+                            ].filter(Boolean).join(' ')}
+                            onClick={() => !isDisabled && handleSelectVoice(option)}
                         >
                             <div className="voice-card-main">
                                 <div className="voice-card-title">
                                     <span className="voice-card-name">{option.label}</span>
-                                    {selected && <span className="voice-active-badge">Active</span>}
+                                    {selected && !warming && <span className="voice-active-badge">Active</span>}
+                                    {warming && <span className="voice-warming-badge">Warming…</span>}
                                 </div>
                                 {(option.lang || option.description) && (
                                     <div className="voice-card-meta">
@@ -163,12 +206,15 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                             </div>
                             <button
                                 className={`voice-test-btn ${testing ? 'testing' : ''}`}
-                                onClick={(e) => { e.stopPropagation(); handleTest(option); }}
-                                disabled={disabled}
-                                title={testing ? 'Stop preview' : 'Preview voice'}
+                                onClick={(e) => { e.stopPropagation(); if (!isDisabled) handleTest(option); }}
+                                disabled={isDisabled}
+                                title={warming ? 'Voice warming up…' : (testing ? 'Stop preview' : 'Preview voice')}
                             >
-                                <Icon name={testing ? 'stopAction' : 'speakAloud'} />
-                                <span>{testing ? 'Stop' : 'Test'}</span>
+                                <Icon
+                                    name={warming ? 'spinner' : (testing ? 'stopAction' : 'speakAloud')}
+                                    spin={warming}
+                                />
+                                <span>{warming ? 'Warming' : (testing ? 'Stop' : 'Test')}</span>
                             </button>
                         </div>
                     );
@@ -229,11 +275,11 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 ) : (
                     <div className="voice-section">
                         <p className="voice-section-desc">
-                            Kokoro-82M is pre-bundled with the extension. Click
-                            <strong> Activate</strong> — the engine loads the local model files
-                            (or downloads them on first run if missing) then warms up
-                            inference for instant speech. All processing happens on your machine.
-                            <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 sec to process paragraph). Still in BETA stage.</p>
+                            Kokoro-82M is pre-bundled with the extension and loads automatically
+                            in the background. The first load reads the local model files
+                            (~82 MB ONNX) into memory — subsequent activations are near-instant
+                            thanks to caching. All processing happens on your machine, fully offline.
+                            <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 seconds to process). Still in BETA stage.</p>
                         </p>
 
                         {kokoroState.status === 'idle' && (
@@ -241,11 +287,10 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                 <div className="kokoro-activate-header">
                                     <Icon name="aiMagic" />
                                     <div>
-                                        <h3>Activate neural voice engine</h3>
+                                        <h3>Neural voice engine starting…</h3>
                                         <p>
-                                            Loads the local Kokoro-82M model — or downloads it from
-                                            HuggingFace if not yet bundled — then caches it for
-                                            fully offline use. No telemetry, no cloud.
+                                            Kokoro loads automatically. Click below if it
+                                            hasn't started yet — or if a previous attempt failed.
                                         </p>
                                     </div>
                                 </div>
@@ -258,7 +303,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                     className="kokoro-activate-btn"
                                     onClick={handleActivateKokoro}
                                 >
-                                    <Icon name="play" /> Activate Kokoro
+                                    <Icon name="play" /> Start Kokoro
                                 </button>
                             </div>
                         )}

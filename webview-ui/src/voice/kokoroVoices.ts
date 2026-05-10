@@ -15,8 +15,13 @@
 import type { VoiceOption } from './voiceConfig';
 
 export const KOKORO_MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';
-/** q8 keeps the model under ~85 MB while preserving good audio quality. */
+/** q8 quantized ONNX — ~82 MB, used on CPU/WASM backend. */
 export const KOKORO_DTYPE = 'q8';
+/** fp32 full-precision ONNX — ~330 MB.
+ *  Used on the WebGPU backend for hardware-accelerated inference (3–5× faster
+ *  than WASM).  q4f16 was removed: ORT WebGPU EP does not reliably handle
+ *  MatMulNBits (INT4) and produces garbled audio. */
+export const KOKORO_DTYPE_GPU = 'fp32';
 
 export const KOKORO_VOICES: VoiceOption[] = [
     { id: 'af_alloy', label: 'Alloy', lang: 'en-US', description: 'American Female · Default', engine: 'kokoro' },
@@ -27,8 +32,8 @@ export const KOKORO_VOICES: VoiceOption[] = [
     { id: 'af_kore', label: 'Kore', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
     { id: 'af_nicole', label: 'Nicole', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
     { id: 'af_nova', label: 'Nova', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
-    { id: 'af_river', label: 'Riva', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
-    { id: 'af_sarah', label: 'Serah', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
+    { id: 'af_river', label: 'River', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
+    { id: 'af_sarah', label: 'Sarah', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
     { id: 'af_sky', label: 'Sky', lang: 'en-US', description: 'American Female', engine: 'kokoro' },
     { id: 'am_adam', label: 'Adam', lang: 'en-US', description: 'American Male', engine: 'kokoro' },
     { id: 'am_echo', label: 'Echo', lang: 'en-US', description: 'American Male', engine: 'kokoro' },

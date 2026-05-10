@@ -18,14 +18,34 @@ const REPO = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 const REVISION = 'main';
 const MODEL_BASE = `https://huggingface.co/${REPO}/resolve/${REVISION}`;
 
-// Files needed for KokoroTTS.from_pretrained(REPO, { dtype: 'q8' }).
+// Files needed for KokoroTTS.from_pretrained(REPO).
 // Voice .bin files are NOT downloaded here — they come from the kokoro-js
 // package (which bundles all 50+ voices already on disk).
+//
+// Two ONNX models are downloaded:
+//
+//   model_quantized.onnx  (~88 MB, INT8)  — WASM/CPU backend.
+//     Always required. Used when WebGPU is unavailable or model.onnx is
+//     absent. Reliable, offline, no GPU needed.
+//
+//   model.onnx  (~330 MB, FP32)  — WebGPU/GPU backend (optional).
+//     Required for hardware-accelerated synthesis. The extension detects
+//     WebGPU at runtime and loads this model automatically when present;
+//     if absent it falls back to model_quantized.onnx (WASM) silently.
+//     GPU synthesis is ~3–5× faster than WASM — worth downloading once.
+//
+//   model_q4f16.onnx was removed: ORT's WebGPU EP does not reliably handle
+//   MatMulNBits (INT4) ops and falls back to WASM with broken f16 emulation,
+//   producing garbled audio. fp32 is the correct dtype for WebGPU.
 const MODEL_FILES = [
     'config.json',
     'tokenizer.json',
     'tokenizer_config.json',
+    // CPU/WASM backend — always downloaded, always used as fallback.
     'onnx/model_quantized.onnx',
+    // GPU/WebGPU backend — optional but strongly recommended for performance.
+    // If you skip this (~330 MB), the extension works fine on CPU/WASM.
+    'onnx/model.onnx',
 ];
 
 // All English voices bundled with kokoro-js (American + British, F + M).

@@ -70,6 +70,26 @@ let stopFlag = 0;
 const warmedVoices = new Set<string>();
 const inflightWarm = new Map<string, Promise<void>>();
 
+/** The backend that successfully initialised the model. Sent in 'ready'. */
+let activeDevice: 'webgpu' | 'wasm' = 'wasm';
+
+/**
+ * Returns true if WebGPU is available in this worker context.
+ * Chromium (Electron) workers expose navigator.gpu; we probe for a real
+ * adapter so we can distinguish "API present" from "GPU actually usable".
+ */
+async function detectWebGPU(): Promise<boolean> {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const gpu = (navigator as any).gpu as { requestAdapter(): Promise<unknown | null> } | undefined;
+        if (!gpu) return false;
+        const adapter = await gpu.requestAdapter();
+        return adapter !== null;
+    } catch {
+        return false;
+    }
+}
+
 // HuggingFace base URL for all Kokoro model assets (config, tokenizer, ONNX, voices).
 // The fetch shim intercepts every request that starts with this prefix and
 // redirects it to the corresponding pre-bundled local asset in dist/kokoro-model/.
@@ -145,6 +165,16 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
     // modelBase is now http://127.0.0.1:PORT/kokoro-model/onnx-community/…
     installFetchShim(modelBase);
 
+    // Clear the kokoro-js voice Cache API so stale or error responses from
+    // previous sessions (e.g. 404s from when the model server wasn't ready)
+    // don't shadow the local voice files.  kokoro-js caches voice .bin
+    // responses under "kokoro-voices" WITHOUT checking response.ok, so any
+    // error response gets stored and returned on the next session — bypassing
+    // our fetch shim entirely.  Clearing on every init is cheap: voice files
+    // are 522 KB each and are served from localhost (model server), so the
+    // re-fetch is nearly instantaneous.
+    try { await caches.delete('kokoro-voices'); } catch { /* ignore — caches may not be available */ }
+
     // ── Configure transformers.js for offline operation. ───────────────────
     //
     // transformers.js builds its normal HuggingFace URLs and calls fetch().
@@ -182,8 +212,7 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
         (env as unknown as { wasmPaths: unknown }).wasmPaths = wasmBase;
     }
 
-    // Load model — per-file byte progress maps to 0..90%.
-    const fileTotals = new Map<string, { loaded: number; total: number }>();
+    // ── Model loading — per-file byte progress maps to 0..90% ──────────────
     const LOAD_LO = 0, LOAD_HI = 90;
 
     type ProgressInfo =
@@ -193,47 +222,141 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
         | { status: 'done'; name: string; file: string }
         | { status: 'ready'; task?: string; model?: string };
 
-    const aggregate = (): number => {
-        let loaded = 0, total = 0, knownAny = false;
-        for (const v of fileTotals.values()) {
-            if (v.total > 0) { knownAny = true; loaded += v.loaded; total += v.total; }
-        }
-        if (!knownAny || total === 0) {
-            const entries = Array.from(fileTotals.values());
-            if (!entries.length) return 0;
-            return entries.filter(e => e.loaded > 0 && e.loaded === e.total).length / entries.length;
-        }
-        return loaded / total;
+    // Encapsulates one attempt to load the model with a given dtype/device.
+    // fileTotals is reset on each call so retry progress starts clean.
+    const loadModel = async (
+        dtype: string,
+        device: string,
+        label: string,
+    ): Promise<KokoroTTS> => {
+        const fileTotals = new Map<string, { loaded: number; total: number }>();
+        lastReportedPercent = -1;
+
+        const aggregate = (): number => {
+            let loaded = 0, total = 0, knownAny = false;
+            for (const v of fileTotals.values()) {
+                if (v.total > 0) { knownAny = true; loaded += v.loaded; total += v.total; }
+            }
+            if (!knownAny || total === 0) {
+                const entries = Array.from(fileTotals.values());
+                if (!entries.length) return 0;
+                return entries.filter(e => e.loaded > 0 && e.loaded === e.total).length / entries.length;
+            }
+            return loaded / total;
+        };
+
+        const loadPct = (frac: number) => LOAD_LO + (LOAD_HI - LOAD_LO) * Math.max(0, Math.min(1, frac));
+
+        const progressCallback = (info: ProgressInfo): void => {
+            if (info.status === 'initiate') {
+                if (!fileTotals.has(info.file)) fileTotals.set(info.file, { loaded: 0, total: 0 });
+                reportProgress(loadPct(aggregate()), label, info.file);
+            } else if (info.status === 'progress') {
+                fileTotals.set(info.file, { loaded: info.loaded ?? 0, total: info.total ?? 0 });
+                reportProgress(loadPct(aggregate()), label, info.file);
+            } else if (info.status === 'done') {
+                const cur = fileTotals.get(info.file);
+                fileTotals.set(info.file, { loaded: cur?.total || 1, total: cur?.total || 1 });
+                reportProgress(loadPct(aggregate()), label, info.file);
+            }
+        };
+
+        return KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
+            dtype,
+            device,
+            progress_callback: progressCallback as unknown as Parameters<typeof KokoroTTS.from_pretrained>[1] extends { progress_callback?: infer P } ? P : never,
+        });
     };
 
-    const loadPct = (frac: number) => LOAD_LO + (LOAD_HI - LOAD_LO) * Math.max(0, Math.min(1, frac));
+    // ── Backend selection: WebGPU first, CPU fallback ─────────────────────
+    //
+    // WebGPU (device: 'webgpu', dtype: 'q4f16'):
+    //   • Uses model_q4f16.onnx — int4 weights with fp16 accumulators (~41 MB).
+    //   • Runs entirely on the GPU: lower per-token latency than WASM/SIMD.
+    //   • Requires the model_q4f16.onnx asset; if it's missing (not yet
+    //     downloaded) or WebGPU adapter unavailable we fall through silently.
+    // WASM (device: 'wasm', dtype: 'q8'):
+    //   • Uses model_quantized.onnx — q8 quantized (~82 MB). Always present.
+    //   • Multi-threaded SIMD, proven offline path.
 
-    const progressCallback = (info: ProgressInfo): void => {
-        if (info.status === 'initiate') {
-            if (!fileTotals.has(info.file)) fileTotals.set(info.file, { loaded: 0, total: 0 });
-            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
-        } else if (info.status === 'progress') {
-            fileTotals.set(info.file, { loaded: info.loaded ?? 0, total: info.total ?? 0 });
-            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
-        } else if (info.status === 'done') {
-            const cur = fileTotals.get(info.file);
-            fileTotals.set(info.file, { loaded: cur?.total || 1, total: cur?.total || 1 });
-            reportProgress(loadPct(aggregate()), 'Loading neural model', info.file);
+    // ── Backend selection ─────────────────────────────────────────────────
+    //
+    // Priority 1: WebGPU + fp32 (model.onnx, ~330 MB)
+    //   The officially recommended WebGPU configuration in transformers.js.
+    //   All tensor ops are native FP32 on GPU → 3–5× faster than WASM.
+    //   Tried and rejected alternatives:
+    //     q4f16 + webgpu: ORT WebGPU EP doesn't reliably handle MatMulNBits
+    //       (INT4) → silently falls to WASM with broken f16 emulation →
+    //       garbled / Chinese-sounding audio output.
+    //     q8 + webgpu: ORT WebGPU EP is FP32/FP16 native; INT8 ops are
+    //       unsupported → inference produces nothing.
+    //   Fails gracefully when model.onnx is absent (404 from local server)
+    //   → the catch block discards the error and tries WASM below.
+    //   To enable GPU: run `node scripts/download-kokoro.js` which downloads
+    //   model.onnx into webview-ui/dist/kokoro-model/.
+    //
+    // Priority 2: WASM + q8 (model_quantized.onnx, ~88 MB)
+    //   Always available; correct audio; used when WebGPU is unavailable
+    //   or model.onnx has not been downloaded yet.
+
+    reportProgress(0, 'Detecting hardware backend');
+    const gpuAvailable = await detectWebGPU();
+
+    if (gpuAvailable) {
+        reportProgress(0, 'Loading neural model (GPU)');
+        try {
+            tts = await loadModel('fp32', 'webgpu', 'Loading neural model (GPU)');
+            activeDevice = 'webgpu';
+        } catch {
+            // Most likely cause: model.onnx not downloaded yet (HTTP 404 from
+            // local model server).  Run download-kokoro.js to enable GPU mode.
+            // Falls through to WASM below.
+            tts = null;
+            lastReportedPercent = -1;
         }
-    };
+    }
 
-    reportProgress(0, 'Loading Kokoro TTS engine');
-    tts = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
-        dtype: 'q8',
-        device: 'wasm',
-        progress_callback: progressCallback as unknown as Parameters<typeof KokoroTTS.from_pretrained>[1] extends { progress_callback?: infer P } ? P : never,
-    });
-    reportProgress(LOAD_HI, 'Neural model loaded');
+    if (!tts) {
+        reportProgress(0, 'Loading neural model (CPU)');
+        tts = await loadModel('q8', 'wasm', 'Loading neural model (CPU)');
+        activeDevice = 'wasm';
+    }
+
+    reportProgress(LOAD_HI, `Neural model loaded (${activeDevice === 'webgpu' ? 'GPU' : 'CPU'})`);
 
     // Warm default voice — JIT-compiles the ONNX graph + espeak WASM.
+    // This happens exactly once per worker lifetime.
     reportProgress(90, 'Warming default voice');
     await warmVoice('af_alloy');
     reportProgress(100, 'Voice engine ready');
+}
+
+/**
+ * Sequentially warm every bundled English voice in the background after the
+ * engine is ready.  Sequential (not parallel) keeps GPU memory pressure low
+ * and ensures voices become available one-by-one in list order — the UI can
+ * enable each card the moment its `warmed` ack arrives.
+ *
+ * Any voice already warmed by an earlier `warm` message is skipped.
+ * This cooperates with on-demand warm requests from the main thread:
+ * `warmVoice()` uses `inflightWarm` for deduplication, so if the main thread
+ * requests a specific voice while the loop is warming a different one, the
+ * request is fulfilled as soon as the current inference completes.
+ */
+async function backgroundWarmAll(): Promise<void> {
+    for (const v of ALL_ENGLISH_VOICES) {
+        if (warmedVoices.has(v)) {
+            // Already warmed (e.g. af_alloy from init, or explicit warm request) —
+            // still post the ack so the main thread's set stays in sync.
+            post({ type: 'warmed', voice: v });
+            continue;
+        }
+        await warmVoice(v);
+        // Only post if it actually succeeded; warmVoice swallows failures.
+        if (warmedVoices.has(v)) {
+            post({ type: 'warmed', voice: v });
+        }
+    }
 }
 
 /** Run a silent inference for 'voice' so subsequent speak()s are instant. */
@@ -247,8 +370,10 @@ async function warmVoice(voice: string): Promise<void> {
             type GenOpts = NonNullable<Parameters<KokoroTTS['generate']>[1]>;
             await tts!.generate('Hi.', { voice } as unknown as GenOpts);
             warmedVoices.add(voice);
-        } catch {
-            // Voice file missing from bundle — swallow; speak() will surface it.
+        } catch (err) {
+            // Voice warm failed — log so devtools shows the root cause.
+            // speak() will attempt synthesis anyway and surface any error there.
+            console.warn(`[kokoro] warmVoice(${voice}) failed:`, err);
         } finally {
             inflightWarm.delete(voice);
         }
@@ -388,7 +513,12 @@ self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
     try {
         if (msg.type === 'init') {
             await init(msg.modelBase, msg.ortBase);
-            post({ type: 'ready' });
+            post({ type: 'ready', device: activeDevice });
+            // Start background warming of all voices now that the main thread
+            // is listening for 'warmed' acks.  Fire-and-forget — backgroundWarmAll
+            // posts a 'warmed' event for each voice as it completes so the UI can
+            // enable them in real time without any polling.
+            void backgroundWarmAll();
         } else if (msg.type === 'warm') {
             await warmVoice(msg.voice);
             post({ type: 'warmed', voice: msg.voice });

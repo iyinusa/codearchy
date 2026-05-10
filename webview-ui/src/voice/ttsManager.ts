@@ -22,6 +22,8 @@ import {
     kokoroWarm,
     kokoroGenerate,
     playKokoroPcm,
+    subscribeVoiceWarmed,
+    getWarmedVoices,
     type KokoroAudio,
     type KokoroInitProgress,
 } from './kokoroTTS';
@@ -181,6 +183,16 @@ export function subscribeKokoroStatus(
     kokoroListeners.add(listener);
     listener(snapshotKokoro());
     return () => { kokoroListeners.delete(listener); };
+}
+
+/** Subscribe to per-voice warm-completion events from the Kokoro worker.
+ *  Fires once per voice id as background warming completes, so callers can
+ *  enable voice UI elements in real time.  Returns an unsubscribe function. */
+export { subscribeVoiceWarmed };
+
+/** Snapshot of all voice ids that are currently warm in the worker. */
+export function getWarmedKokoroVoices(): ReadonlySet<string> {
+    return getWarmedVoices();
 }
 
 /** Boot the Kokoro worker. Idempotent — safe to call multiple times. */
