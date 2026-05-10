@@ -845,6 +845,7 @@ export class ArchitecturePanel {
 
   private dispose() {
     ArchitecturePanel.instance = undefined;
+    this.ollamaService.dispose();
     this.hostRecorder.cancel();
     this.modelServer?.close();
     this.modelServer = null;

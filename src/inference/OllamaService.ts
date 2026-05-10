@@ -1,5 +1,7 @@
-import * as http from 'http';
+import * as path from 'path';
+import { Worker } from 'worker_threads';
 import { ArchitectureGraph } from '../types';
+import type { WorkerRequest, WorkerRequestBody, WorkerResponse, WorkerProfile } from './ollamaWorker';
 
 export interface OllamaModelInfo {
     name: string;
@@ -8,7 +10,7 @@ export interface OllamaModelInfo {
 }
 
 export interface ModelOption {
-    id: 'gemma-e2b' | 'gemma-e4b';
+    id: 'gemma-e2b' | 'gemma-e4b' | 'gemma-26b';
     label: string;
     ollamaTag: string;
     description: string;
@@ -37,6 +39,16 @@ export const MODEL_OPTIONS: ModelOption[] = [
         paramSize: '8B Parameters',
         diskSize: '9.6 GB',
         ramRequired: '~8 GB RAM',
+        installed: false,
+    },
+    {
+        id: 'gemma-26b',
+        label: 'Gemma 4 26B',
+        ollamaTag: 'gemma4:26b',
+        description: 'Extensive analysis — ideal for slightly larger codebases and deep insights.',
+        paramSize: '25.8B Parameters',
+        diskSize: '18 GB',
+        ramRequired: '~16 GB RAM',
         installed: false,
     },
 ];
@@ -214,6 +226,109 @@ export class OllamaService {
     /** Cache for isAvailable() — avoid a redundant HTTP round-trip on every chat send. */
     private _availableAt = 0;
     private _availableResult = false;
+
+    // ── Worker thread infrastructure ──────────────────────────────────────
+    /** Lazily-created worker thread that handles all Ollama HTTP calls. */
+    private _worker: Worker | undefined;
+    /** In-flight requests keyed by their correlation ID. */
+    private _pending = new Map<string, {
+        resolve: (value: string) => void;
+        reject: (reason: Error) => void;
+        onChunk?: (text: string) => void;
+        onThinkChunk?: (text: string) => void;
+    }>();
+    /** Monotonic counter used to generate unique request IDs. */
+    private _reqId = 0;
+
+    // ── Worker lifecycle ──────────────────────────────────────────────────
+
+    /**
+     * Lazily creates and returns the shared Ollama worker thread.
+     * The worker is kept alive for the lifetime of the OllamaService instance
+     * and terminated in `dispose()`.
+     */
+    private getWorker(): Worker {
+        if (this._worker) { return this._worker; }
+
+        const workerPath = path.join(__dirname, 'ollamaWorker.js');
+        const worker = new Worker(workerPath);
+
+        worker.on('message', (msg: WorkerResponse) => {
+            const pending = this._pending.get(msg.id);
+            if (!pending) { return; } // already resolved / timed-out
+
+            switch (msg.type) {
+                case 'chunk':
+                    pending.onChunk?.(msg.text);
+                    break;
+                case 'thinkChunk':
+                    pending.onThinkChunk?.(msg.text);
+                    break;
+                case 'result':
+                    this._pending.delete(msg.id);
+                    pending.resolve(msg.data);
+                    break;
+                case 'error':
+                    this._pending.delete(msg.id);
+                    pending.reject(new Error(msg.message));
+                    break;
+            }
+        });
+
+        worker.on('error', (err) => {
+            // Reject all in-flight requests so callers don't hang.
+            for (const [, pending] of this._pending) {
+                pending.reject(new Error(`Ollama worker error: ${err.message}`));
+            }
+            this._pending.clear();
+            this._worker = undefined; // allow re-creation on next call
+        });
+
+        worker.on('exit', (code) => {
+            if (code !== 0) {
+                for (const [, pending] of this._pending) {
+                    pending.reject(new Error(`Ollama worker exited unexpectedly (code ${code})`));
+                }
+                this._pending.clear();
+            }
+            this._worker = undefined;
+        });
+
+        this._worker = worker;
+        return worker;
+    }
+
+    /**
+     * Sends a request to the worker and returns a Promise that resolves with
+     * the full response string.  `onChunk` / `onThinkChunk` are called for
+     * every streaming token received from Ollama.
+     */
+    private workerCall(
+        req: WorkerRequestBody,
+        onChunk?: (text: string) => void,
+        onThinkChunk?: (text: string) => void,
+    ): Promise<string> {
+        const id = String(++this._reqId);
+        return new Promise((resolve, reject) => {
+            this._pending.set(id, { resolve, reject, onChunk, onThinkChunk });
+            // Spread is safe: WorkerRequestBody is a discriminated union and
+            // the worker uses req.op to dispatch, which is preserved.
+            this.getWorker().postMessage({ id, ...req } as WorkerRequest);
+        });
+    }
+
+    /**
+     * Terminate the worker thread and cancel any in-flight requests.
+     * Call this when the ArchitecturePanel is disposed.
+     */
+    dispose(): void {
+        for (const [, pending] of this._pending) {
+            pending.reject(new Error('OllamaService disposed'));
+        }
+        this._pending.clear();
+        this._worker?.terminate();
+        this._worker = undefined;
+    }
 
     /** Check if Ollama is running — result is cached for 10 s to prevent
      *  repeated round-trips on every chat message while the model is active. */
@@ -586,14 +701,7 @@ export class OllamaService {
      *  is a best-effort optimisation that should never surface to the user. */
     async warmUp(modelTag: string): Promise<void> {
         try {
-            const body = JSON.stringify({
-                model: modelTag,
-                prompt: ' ',
-                stream: false,
-                keep_alive: '30m',
-                options: { num_predict: 1 },
-            });
-            await this.httpPost('/api/generate', body, 90_000);
+            await this.workerCall({ op: 'warmUp', model: modelTag, keepAlive: '30m' });
             // Stamp the availability cache so the next isAvailable() call is
             // answered instantly — the warmup proved Ollama is running.
             this._availableResult = true;
@@ -787,7 +895,7 @@ GUIDELINES:
         return lines.join('\n');
     }
 
-    // --- Ollama API Calls ---
+    // --- Ollama API Calls (delegated to worker thread) ---
 
     private async generate(
         model: string,
@@ -796,98 +904,16 @@ GUIDELINES:
         onChunk?: (text: string) => void,
         extraBodyFields?: Record<string, unknown>
     ): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const body = JSON.stringify({
+        return this.workerCall(
+            {
+                op: 'generate',
                 model,
                 prompt,
-                stream: true,
-                keep_alive: profile.keepAlive,
-                options: {
-                    temperature: profile.temperature,
-                    num_predict: profile.numPredict,
-                    num_ctx: profile.numCtx,
-                    top_k: profile.topK,
-                    top_p: profile.topP,
-                },
-                ...extraBodyFields,
-            });
-
-            const url = new URL(`${OLLAMA_BASE}/api/generate`);
-            const options: http.RequestOptions = {
-                hostname: url.hostname,
-                port: url.port,
-                path: url.pathname,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(body),
-                },
-                timeout: 120000,
-            };
-
-            let fullResponse = '';
-
-            const req = http.request(options, (res) => {
-                if (res.statusCode !== 200) {
-                    reject(new Error(`Ollama returned status ${res.statusCode}`));
-                    return;
-                }
-
-                res.setEncoding('utf-8');
-                let buffer = '';
-
-                res.on('data', (chunk: string) => {
-                    buffer += chunk;
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || '';
-
-                    for (const line of lines) {
-                        if (!line.trim()) continue;
-                        try {
-                            const parsed = JSON.parse(line);
-                            if (parsed.response) {
-                                fullResponse += parsed.response;
-                                onChunk?.(parsed.response);
-                            }
-                            if (parsed.done) {
-                                resolve(fullResponse);
-                            }
-                        } catch {
-                            // skip malformed lines
-                        }
-                    }
-                });
-
-                res.on('end', () => {
-                    if (buffer.trim()) {
-                        try {
-                            const parsed = JSON.parse(buffer);
-                            if (parsed.response) {
-                                fullResponse += parsed.response;
-                                onChunk?.(parsed.response);
-                            }
-                        } catch {
-                            // ignore
-                        }
-                    }
-                    resolve(fullResponse);
-                });
-
-                res.on('error', reject);
-            });
-
-            req.on('error', (err) => {
-                reject(new Error(`Cannot connect to Ollama: ${err.message}`));
-            });
-
-            req.on('timeout', () => {
-                req.destroy();
-                reject(new Error('Ollama request timed out'));
-            });
-
-            req.write(body);
-            req.end();
-        });
+                profile: profile as WorkerProfile,
+                extraBodyFields,
+            },
+            onChunk,
+        );
     }
 
     private async chatCompletion(
@@ -897,172 +923,24 @@ GUIDELINES:
         onChunk?: (text: string) => void,
         onThinkChunk?: (text: string) => void
     ): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const body = JSON.stringify({
+        return this.workerCall(
+            {
+                op: 'chatCompletion',
                 model,
                 messages,
-                stream: true,
-                think: profile.think,
-                keep_alive: profile.keepAlive,
-                options: {
-                    temperature: Math.max(profile.temperature, 0.0),
-                    num_predict: profile.numPredict,
-                    num_ctx: profile.numCtx,
-                    top_k: profile.topK,
-                    top_p: profile.topP,
-                },
-            });
-
-            const url = new URL(`${OLLAMA_BASE}/api/chat`);
-            const options: http.RequestOptions = {
-                hostname: url.hostname,
-                port: url.port,
-                path: url.pathname,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(body),
-                },
-                timeout: 90000,
-            };
-
-            let fullResponse = '';
-
-            const req = http.request(options, (res) => {
-                if (res.statusCode !== 200) {
-                    reject(new Error(`Ollama returned status ${res.statusCode}`));
-                    return;
-                }
-
-                res.setEncoding('utf-8');
-                let buffer = '';
-
-                res.on('data', (chunk: string) => {
-                    buffer += chunk;
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || '';
-
-                    for (const line of lines) {
-                        if (!line.trim()) continue;
-                        try {
-                            const parsed = JSON.parse(line);
-                            // Thinking tokens (models that support think:true)
-                            if (parsed.message?.thinking) {
-                                onThinkChunk?.(parsed.message.thinking);
-                            }
-                            if (parsed.message?.content) {
-                                fullResponse += parsed.message.content;
-                                onChunk?.(parsed.message.content);
-                            }
-                        } catch {
-                            // skip
-                        }
-                    }
-                });
-
-                res.on('end', () => {
-                    if (buffer.trim()) {
-                        try {
-                            const parsed = JSON.parse(buffer);
-                            if (parsed.message?.thinking) {
-                                onThinkChunk?.(parsed.message.thinking);
-                            }
-                            if (parsed.message?.content) {
-                                fullResponse += parsed.message.content;
-                                onChunk?.(parsed.message.content);
-                            }
-                        } catch {
-                            // ignore
-                        }
-                    }
-                    resolve(fullResponse);
-                });
-
-                res.on('error', reject);
-            });
-
-            req.on('error', (err) => {
-                reject(new Error(`Cannot connect to Ollama: ${err.message}`));
-            });
-
-            req.on('timeout', () => {
-                req.destroy();
-                reject(new Error('Chat request timed out'));
-            });
-
-            req.write(body);
-            req.end();
-        });
+                profile: profile as WorkerProfile,
+            },
+            onChunk,
+            onThinkChunk,
+        );
     }
 
     private httpGet(urlStr: string): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const url = new URL(urlStr);
-            const options: http.RequestOptions = {
-                hostname: url.hostname,
-                port: url.port,
-                path: url.pathname,
-                method: 'GET',
-                timeout: 5000,
-            };
-
-            const req = http.request(options, (res) => {
-                let data = '';
-                res.setEncoding('utf-8');
-                res.on('data', (chunk: string) => { data += chunk; });
-                res.on('end', () => resolve(data));
-                res.on('error', reject);
-            });
-
-            req.on('error', reject);
-            req.on('timeout', () => {
-                req.destroy();
-                reject(new Error('Request timed out'));
-            });
-            req.end();
-        });
+        return this.workerCall({ op: 'httpGet', url: urlStr });
     }
 
     private httpPost(pathName: string, body: string, timeoutMs: number): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const url = new URL(`${OLLAMA_BASE}${pathName}`);
-            const options: http.RequestOptions = {
-                hostname: url.hostname,
-                port: url.port,
-                path: url.pathname,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(body),
-                },
-                timeout: timeoutMs,
-            };
-
-            const req = http.request(options, (res) => {
-                let data = '';
-                res.setEncoding('utf-8');
-                res.on('data', (chunk: string) => { data += chunk; });
-                res.on('end', () => {
-                    if (res.statusCode !== 200) {
-                        reject(new Error(`Ollama returned status ${res.statusCode}: ${data}`));
-                        return;
-                    }
-                    resolve(data);
-                });
-                res.on('error', reject);
-            });
-
-            req.on('error', (err) => {
-                reject(new Error(`Cannot connect to Ollama: ${err.message}`));
-            });
-            req.on('timeout', () => {
-                req.destroy();
-                reject(new Error('Ollama request timed out'));
-            });
-
-            req.write(body);
-            req.end();
-        });
+        return this.workerCall({ op: 'httpPost', path: pathName, body, timeoutMs });
     }
 
     private getAudioFormatFromMime(mimeType: string): string {
