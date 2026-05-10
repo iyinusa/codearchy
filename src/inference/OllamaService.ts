@@ -236,9 +236,12 @@ export class OllamaService {
         reject: (reason: Error) => void;
         onChunk?: (text: string) => void;
         onThinkChunk?: (text: string) => void;
+        onPullProgress?: (status: string, completed: number, total: number) => void;
     }>();
     /** Monotonic counter used to generate unique request IDs. */
     private _reqId = 0;
+    /** Correlation ID of the currently-running pull, if any. */
+    private _currentPullId: string | null = null;
 
     // ── Worker lifecycle ──────────────────────────────────────────────────
 
@@ -263,6 +266,9 @@ export class OllamaService {
                     break;
                 case 'thinkChunk':
                     pending.onThinkChunk?.(msg.text);
+                    break;
+                case 'pullProgress':
+                    pending.onPullProgress?.(msg.status, msg.completed, msg.total);
                     break;
                 case 'result':
                     this._pending.delete(msg.id);
@@ -367,6 +373,51 @@ export class OllamaService {
                 models: MODEL_OPTIONS.map((m) => ({ ...m, installed: false })),
             };
         }
+    }
+
+    /**
+     * Stream-download a model from Ollama's registry. Calls `onProgress` for
+     * every status line received so the UI can render a live progress bar.
+     * The returned Promise resolves when the pull completes and rejects on
+     * failure or cancellation.
+     */
+    async pullModel(
+        ollamaTag: string,
+        onProgress: (progress: { status: string; completed: number; total: number }) => void,
+    ): Promise<void> {
+        const id = String(++this._reqId);
+        this._currentPullId = id;
+        return new Promise<void>((resolve, reject) => {
+            this._pending.set(id, {
+                resolve: (_data: string) => {
+                    if (this._currentPullId === id) this._currentPullId = null;
+                    resolve();
+                },
+                reject: (err: Error) => {
+                    if (this._currentPullId === id) this._currentPullId = null;
+                    reject(err);
+                },
+                onPullProgress: (status, completed, total) => {
+                    onProgress({ status, completed, total });
+                },
+            });
+            this.getWorker().postMessage({ id, op: 'pullModel', model: ollamaTag });
+        });
+    }
+
+    /** Cancel an in-progress model download. */
+    cancelPull(): void {
+        if (!this._currentPullId) return;
+        const targetId = this._currentPullId;
+        // Fire-and-forget cancel message — no pending entry needed.
+        this.getWorker().postMessage({ id: String(++this._reqId), op: 'cancelRequest', targetId });
+    }
+
+    /** Remove a model from the local Ollama installation. */
+    async deleteModel(ollamaTag: string): Promise<void> {
+        await this.workerCall({ op: 'httpDelete', model: ollamaTag });
+        // Bust the availability cache so status refreshes pick up the change.
+        this._availableAt = 0;
     }
 
     /** Generate high-level system architecture from codebase graph */

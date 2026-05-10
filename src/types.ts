@@ -128,6 +128,19 @@ export enum WebviewMessageType {
     SystemArchStream = 'systemArchStream',
     /** Webview → host: switch the AI processing tier (fast/moderate/indepth). */
     SetProcessingMode = 'setProcessingMode',
+    // Model pull / delete management
+    /** Webview → host: begin downloading a model via `ollama pull`. */
+    PullModel = 'pullModel',
+    /** Host → webview: streaming download progress. */
+    PullModelProgress = 'pullModelProgress',
+    /** Host → webview: pull completed (success or failure). */
+    PullModelComplete = 'pullModelComplete',
+    /** Webview → host: abort an in-progress download. */
+    CancelPull = 'cancelPull',
+    /** Webview → host: remove an installed model from Ollama. */
+    DeleteModel = 'deleteModel',
+    /** Host → webview: result of a model deletion. */
+    DeleteModelResult = 'deleteModelResult',
     // Chat / Conversation
     ChatMessage = 'chatMessage',
     ChatResponse = 'chatResponse',

@@ -211,6 +211,27 @@ export class ArchitecturePanel {
         this.handleGenerateSystemArch();
         break;
 
+      // --- Model Pull / Delete ---
+      case WebviewMessageType.PullModel: {
+        const pullPayload = message.payload as { ollamaTag: string };
+        if (pullPayload?.ollamaTag) {
+          this.handlePullModel(pullPayload.ollamaTag);
+        }
+        break;
+      }
+
+      case WebviewMessageType.CancelPull:
+        this.ollamaService.cancelPull();
+        break;
+
+      case WebviewMessageType.DeleteModel: {
+        const deletePayload = message.payload as { ollamaTag: string };
+        if (deletePayload?.ollamaTag) {
+          this.handleDeleteModel(deletePayload.ollamaTag);
+        }
+        break;
+      }
+
       // --- Chat Messages ---
       case WebviewMessageType.ChatMessage: {
         const chatPayload = message.payload as { content: string };
@@ -416,6 +437,56 @@ export class ArchitecturePanel {
     const opt = MODEL_OPTIONS.find(m => m.id === modelId);
     if (opt) {
       this.ollamaService.warmUp(opt.ollamaTag).catch(() => { /* ignore */ });
+    }
+  }
+
+  private async handlePullModel(ollamaTag: string) {
+    try {
+      await this.ollamaService.pullModel(ollamaTag, (progress) => {
+        this.panel.webview.postMessage({
+          type: WebviewMessageType.PullModelProgress,
+          payload: { ollamaTag, ...progress },
+        });
+      });
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.PullModelComplete,
+        payload: { ollamaTag, success: true },
+      });
+      // Refresh so the UI reflects the newly installed model.
+      this.handleModelStatusRequest();
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const cancelled = /cancelled/i.test(errMsg) || /ECONNRESET/i.test(errMsg);
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.PullModelComplete,
+        payload: { ollamaTag, success: false, cancelled, error: errMsg },
+      });
+      if (!cancelled) {
+        this.handleModelStatusRequest();
+      }
+    }
+  }
+
+  private async handleDeleteModel(ollamaTag: string) {
+    try {
+      await this.ollamaService.deleteModel(ollamaTag);
+      // If the deleted model was currently selected, clear the selection.
+      const opt = MODEL_OPTIONS.find(m => m.ollamaTag === ollamaTag);
+      if (opt && this.selectedModel === opt.id) {
+        this.selectedModel = null;
+        const config = vscode.workspace.getConfiguration('codearchy');
+        await config.update('aiModel', 'none', vscode.ConfigurationTarget.Workspace);
+      }
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.DeleteModelResult,
+        payload: { ollamaTag, success: true },
+      });
+      this.handleModelStatusRequest();
+    } catch (err) {
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.DeleteModelResult,
+        payload: { ollamaTag, success: false, error: err instanceof Error ? err.message : String(err) },
+      });
     }
   }
 

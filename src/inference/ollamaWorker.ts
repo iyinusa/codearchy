@@ -31,7 +31,10 @@ export type WorkerRequestBody =
     | { op: 'chatCompletion'; model: string; messages: Array<{ role: string; content: string }>; profile: WorkerProfile }
     | { op: 'httpGet'; url: string }
     | { op: 'httpPost'; path: string; body: string; timeoutMs: number }
-    | { op: 'warmUp'; model: string; keepAlive: string };
+    | { op: 'warmUp'; model: string; keepAlive: string }
+    | { op: 'pullModel'; model: string }
+    | { op: 'cancelRequest'; targetId: string }
+    | { op: 'httpDelete'; model: string };
 
 /** Full request sent to the worker thread (body + correlation id). */
 export type WorkerRequest = WorkerRequestBody & { id: string };
@@ -40,7 +43,8 @@ export type WorkerResponse =
     | { id: string; type: 'chunk'; text: string }
     | { id: string; type: 'thinkChunk'; text: string }
     | { id: string; type: 'result'; data: string }
-    | { id: string; type: 'error'; message: string };
+    | { id: string; type: 'error'; message: string }
+    | { id: string; type: 'pullProgress'; status: string; completed: number; total: number };
 
 /* ── Guard: must only run inside a worker_thread ────────────────────────── */
 
@@ -55,6 +59,9 @@ parentPort.on('message', (req: WorkerRequest) => {
         case 'httpGet': handleHttpGet(req); break;
         case 'httpPost': handleHttpPost(req); break;
         case 'warmUp': handleWarmUp(req); break;
+        case 'pullModel': handlePullModel(req); break;
+        case 'cancelRequest': handleCancelRequest(req); break;
+        case 'httpDelete': handleHttpDelete(req); break;
     }
 });
 
@@ -228,6 +235,120 @@ function handleWarmUp(req: Extract<WorkerRequest, { op: 'warmUp' }>): void {
     // Allow the same 5 minutes as the generate path so it reliably pre-warms
     // the model before the user's first real request.
     handleHttpPost({ id, op: 'httpPost', path: '/api/generate', body, timeoutMs: 300_000 });
+}
+
+/* ── /api/pull (streaming pull with progress) ───────────────────────────── */
+
+/** Map of active HTTP requests keyed by request id — enables cancel. */
+const activeRequests = new Map<string, http.ClientRequest>();
+
+function handlePullModel(req: Extract<WorkerRequest, { op: 'pullModel' }>): void {
+    const { id, model } = req;
+    const body = JSON.stringify({ model, stream: true });
+    const url = new URL(`${OLLAMA_BASE}/api/pull`);
+    const opts: http.RequestOptions = {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+        },
+    };
+
+    const r = http.request(opts, (res) => {
+        activeRequests.delete(id);
+        if (res.statusCode !== 200) {
+            send({ id, type: 'error', message: `Ollama pull returned status ${res.statusCode}` });
+            return;
+        }
+        res.setEncoding('utf-8');
+        let buf = '';
+        res.on('data', (chunk: string) => {
+            buf += chunk;
+            const lines = buf.split('\n');
+            buf = lines.pop() ?? '';
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const parsed = JSON.parse(line) as Record<string, unknown>;
+                    const status = typeof parsed.status === 'string' ? parsed.status : '';
+                    const completed = typeof parsed.completed === 'number' ? parsed.completed : 0;
+                    const total = typeof parsed.total === 'number' ? parsed.total : 0;
+                    send({ id, type: 'pullProgress', status, completed, total });
+                } catch { /* skip malformed lines */ }
+            }
+        });
+        res.on('end', () => {
+            if (buf.trim()) {
+                try {
+                    const parsed = JSON.parse(buf) as Record<string, unknown>;
+                    const status = typeof parsed.status === 'string' ? parsed.status : '';
+                    send({ id, type: 'pullProgress', status, completed: 0, total: 0 });
+                } catch { /* ignore */ }
+            }
+            send({ id, type: 'result', data: 'success' });
+        });
+        res.on('error', (e) => send({ id, type: 'error', message: e.message }));
+    });
+
+    activeRequests.set(id, r);
+    r.on('error', (e) => {
+        activeRequests.delete(id);
+        const msg = e.message.includes('socket hang up') || e.message.includes('ECONNRESET')
+            ? 'Download cancelled'
+            : `Cannot connect to Ollama: ${e.message}`;
+        send({ id, type: 'error', message: msg });
+    });
+    r.write(body);
+    r.end();
+}
+
+function handleCancelRequest(req: Extract<WorkerRequest, { op: 'cancelRequest' }>): void {
+    const { targetId } = req;
+    const r = activeRequests.get(targetId);
+    if (r) {
+        activeRequests.delete(targetId);
+        r.destroy();
+    }
+    // No result sent back — the destroyed pull will emit its own error event.
+}
+
+/* ── DELETE /api/delete ──────────────────────────────────────────────────── */
+
+function handleHttpDelete(req: Extract<WorkerRequest, { op: 'httpDelete' }>): void {
+    const { id, model } = req;
+    const body = JSON.stringify({ model });
+    const url = new URL(`${OLLAMA_BASE}/api/delete`);
+    const opts: http.RequestOptions = {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'DELETE',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 15000,
+    };
+    let data = '';
+    const r = http.request(opts, (res) => {
+        res.setEncoding('utf-8');
+        res.on('data', (c: string) => { data += c; });
+        res.on('end', () => {
+            if (res.statusCode !== 200) {
+                send({ id, type: 'error', message: `Ollama delete returned status ${res.statusCode}: ${data}` });
+            } else {
+                send({ id, type: 'result', data: 'deleted' });
+            }
+        });
+        res.on('error', (e) => send({ id, type: 'error', message: e.message }));
+    });
+    r.on('error', (e) => send({ id, type: 'error', message: `Cannot connect to Ollama: ${e.message}` }));
+    r.on('timeout', () => { r.destroy(); send({ id, type: 'error', message: 'Delete request timed out' }); });
+    r.write(body);
+    r.end();
 }
 
 /* ── Shared streaming helper ────────────────────────────────────────────── */
