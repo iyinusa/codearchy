@@ -76,6 +76,22 @@ let scheduledEndTime = 0;
 // same warm twice. Worker echoes a 'warmed' ack so this stays in sync.
 const warmedVoices = new Set<string>();
 
+// Subscribers notified whenever a new voice becomes warmed.
+const warmedVoiceListeners = new Set<(voice: string) => void>();
+
+/** Subscribe to voice-warm completion events.
+ *  Listener fires once per voice, with the voice id, as the worker finishes
+ *  background warming.  Returns an unsubscribe function. */
+export function subscribeVoiceWarmed(listener: (voice: string) => void): () => void {
+    warmedVoiceListeners.add(listener);
+    return () => { warmedVoiceListeners.delete(listener); };
+}
+
+/** Snapshot of all voices currently warmed in the worker. */
+export function getWarmedVoices(): ReadonlySet<string> {
+    return warmedVoices;
+}
+
 // ── Generate (cache-prefill) state ─────────────────────────────────────────
 //
 // Independent lane from speak(): used to pre-synthesise audio that will be
@@ -213,6 +229,7 @@ function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
 
     if (msg.type === 'warmed') {
         warmedVoices.add(msg.voice);
+        warmedVoiceListeners.forEach(l => { try { l(msg.voice); } catch { /* ignore */ } });
         return;
     }
 

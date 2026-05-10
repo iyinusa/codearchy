@@ -331,6 +331,34 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
     reportProgress(100, 'Voice engine ready');
 }
 
+/**
+ * Sequentially warm every bundled English voice in the background after the
+ * engine is ready.  Sequential (not parallel) keeps GPU memory pressure low
+ * and ensures voices become available one-by-one in list order — the UI can
+ * enable each card the moment its `warmed` ack arrives.
+ *
+ * Any voice already warmed by an earlier `warm` message is skipped.
+ * This cooperates with on-demand warm requests from the main thread:
+ * `warmVoice()` uses `inflightWarm` for deduplication, so if the main thread
+ * requests a specific voice while the loop is warming a different one, the
+ * request is fulfilled as soon as the current inference completes.
+ */
+async function backgroundWarmAll(): Promise<void> {
+    for (const v of ALL_ENGLISH_VOICES) {
+        if (warmedVoices.has(v)) {
+            // Already warmed (e.g. af_alloy from init, or explicit warm request) —
+            // still post the ack so the main thread's set stays in sync.
+            post({ type: 'warmed', voice: v });
+            continue;
+        }
+        await warmVoice(v);
+        // Only post if it actually succeeded; warmVoice swallows failures.
+        if (warmedVoices.has(v)) {
+            post({ type: 'warmed', voice: v });
+        }
+    }
+}
+
 /** Run a silent inference for 'voice' so subsequent speak()s are instant. */
 async function warmVoice(voice: string): Promise<void> {
     if (!tts) return;
@@ -486,6 +514,11 @@ self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
         if (msg.type === 'init') {
             await init(msg.modelBase, msg.ortBase);
             post({ type: 'ready', device: activeDevice });
+            // Start background warming of all voices now that the main thread
+            // is listening for 'warmed' acks.  Fire-and-forget — backgroundWarmAll
+            // posts a 'warmed' event for each voice as it completes so the UI can
+            // enable them in real time without any polling.
+            void backgroundWarmAll();
         } else if (msg.type === 'warm') {
             await warmVoice(msg.voice);
             post({ type: 'warmed', voice: msg.voice });

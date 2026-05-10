@@ -1189,6 +1189,13 @@ body {
     cursor: not-allowed;
 }
 
+/* Warming: engine is ready but this voice hasn't finished its background warm
+   inference yet.  More visible than .disabled (engine-not-loaded) so the user
+   can see the progress; cursor stays not-allowed since clicking is blocked. */
+.voice-card.warming {
+    opacity: 0.72;
+}
+
 .voice-card-main {
     display: flex;
     flex-direction: column;
@@ -1211,6 +1218,16 @@ body {
 .voice-active-badge {
     background: #4caf50;
     color: #fff;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.voice-warming-badge {
+    background: rgba(255, 179, 0, 0.15);
+    color: #ffb300;
+    border: 1px solid rgba(255, 179, 0, 0.30);
     padding: 1px 8px;
     border-radius: 8px;
     font-size: 10px;
