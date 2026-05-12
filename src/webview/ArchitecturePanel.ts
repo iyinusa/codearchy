@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
+import { exec } from 'child_process';
 import { ArchitectureGraph, WebviewMessage, WebviewMessageType } from '../types';
 import { OllamaService, MODEL_OPTIONS, SystemArchitecture, ProcessingMode } from '../inference/OllamaService';
 import { HostAudioRecorder } from '../audio/HostAudioRecorder';
@@ -461,10 +462,29 @@ export class ArchitecturePanel {
         type: WebviewMessageType.PullModelComplete,
         payload: { ollamaTag, success: false, cancelled, error: errMsg },
       });
-      if (!cancelled) {
-        this.handleModelStatusRequest();
+      if (cancelled) {
+        // Remove partial download artifacts left by the interrupted pull.
+        // The HTTP DELETE API only works on fully-registered models (those with a
+        // manifest), so for a mid-download cancel we fall back to `ollama rm` which
+        // handles partial / manifest-less state that the API cannot find.
+        this.cleanupPartialDownload(ollamaTag);
       }
+      this.handleModelStatusRequest();
     }
+  }
+
+  /** Removes any blobs/manifest left by a cancelled pull, trying the HTTP API
+   *  first and falling back to the `ollama rm` CLI for partially-downloaded models. */
+  private cleanupPartialDownload(ollamaTag: string): void {
+    this.ollamaService.deleteModel(ollamaTag)
+      .catch(() => {
+        // DELETE API returned a non-200 (model not registered) — fall back to CLI.
+        exec(`ollama rm ${ollamaTag}`, () => {
+          // Result is intentionally ignored; a failure here just means Ollama
+          // had no state to clean up, which is fine.
+          this.handleModelStatusRequest();
+        });
+      });
   }
 
   private async handleDeleteModel(ollamaTag: string) {

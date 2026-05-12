@@ -257,10 +257,22 @@ function handlePullModel(req: Extract<WorkerRequest, { op: 'pullModel' }>): void
         },
     };
 
-    const r = http.request(opts, (res) => {
+    // finish() is idempotent — only the first call sends a message and
+    // removes the entry from activeRequests.  This prevents double-sends when
+    // both res.on('close') and r.on('error') fire during a cancel.
+    let finished = false;
+    const finish = (msg: WorkerResponse): void => {
+        if (finished) return;
+        finished = true;
         activeRequests.delete(id);
+        send(msg);
+    };
+
+    const r = http.request(opts, (res) => {
+        // Do NOT delete from activeRequests here — keep it alive so that
+        // handleCancelRequest can still destroy the request mid-stream.
         if (res.statusCode !== 200) {
-            send({ id, type: 'error', message: `Ollama pull returned status ${res.statusCode}` });
+            finish({ id, type: 'error', message: `Ollama pull returned status ${res.statusCode}` });
             return;
         }
         res.setEncoding('utf-8');
@@ -288,18 +300,19 @@ function handlePullModel(req: Extract<WorkerRequest, { op: 'pullModel' }>): void
                     send({ id, type: 'pullProgress', status, completed: 0, total: 0 });
                 } catch { /* ignore */ }
             }
-            send({ id, type: 'result', data: 'success' });
+            finish({ id, type: 'result', data: 'success' });
         });
-        res.on('error', (e) => send({ id, type: 'error', message: e.message }));
+        res.on('error', (e) => finish({ id, type: 'error', message: e.message }));
+        // Fired when the socket is destroyed mid-stream (e.g. via cancelRequest).
+        res.on('close', () => finish({ id, type: 'error', message: 'Download cancelled' }));
     });
 
     activeRequests.set(id, r);
     r.on('error', (e) => {
-        activeRequests.delete(id);
         const msg = e.message.includes('socket hang up') || e.message.includes('ECONNRESET')
             ? 'Download cancelled'
             : `Cannot connect to Ollama: ${e.message}`;
-        send({ id, type: 'error', message: msg });
+        finish({ id, type: 'error', message: msg });
     });
     r.write(body);
     r.end();
