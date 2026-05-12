@@ -1079,6 +1079,230 @@ body {
     font-size: 11px;
 }
 
+/* ── Model action buttons ── */
+.model-actions {
+    margin-top: 10px;
+    display: flex;
+    gap: 8px;
+}
+
+.btn-install-model,
+.btn-remove-model {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 12px;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+
+.btn-install-model {
+    background: rgba(33, 150, 243, 0.15);
+    color: #64b5f6;
+    border-color: rgba(33, 150, 243, 0.35);
+}
+
+.btn-install-model:hover:not(:disabled) {
+    background: rgba(33, 150, 243, 0.28);
+    border-color: #64b5f6;
+}
+
+.btn-install-model:disabled {
+    opacity: 0.38;
+    cursor: not-allowed;
+}
+
+.btn-remove-model {
+    background: rgba(244, 67, 54, 0.12);
+    color: #e57373;
+    border-color: rgba(244, 67, 54, 0.3);
+}
+
+.btn-remove-model:hover {
+    background: rgba(244, 67, 54, 0.24);
+    border-color: #e57373;
+}
+
+/* ── Download progress ── */
+.model-pull-progress {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.pull-status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    gap: 8px;
+}
+
+.pull-status-text {
+    color: var(--fg-muted, #aaa);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+}
+
+.pull-bytes {
+    opacity: 0.7;
+}
+
+.pull-percent {
+    font-weight: 600;
+    color: #64b5f6;
+    min-width: 32px;
+    text-align: right;
+}
+
+.pull-bar-track {
+    height: 4px;
+    background: var(--input-bg);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.pull-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #64b5f6, #42a5f5);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
+
+.pull-bar-fill.indeterminate {
+    width: 40% !important;
+    animation: indeterminate-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes indeterminate-slide {
+    0% {
+        transform: translateX(-100%);
+    }
+
+    100% {
+        transform: translateX(350%);
+    }
+}
+
+.btn-cancel-pull {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--fg-muted, #aaa);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.btn-cancel-pull:hover {
+    background: rgba(244, 67, 54, 0.18);
+    color: #e57373;
+    border-color: rgba(244, 67, 54, 0.4);
+}
+
+/* ── Delete confirmation banner ── */
+.model-delete-confirm {
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: rgba(244, 67, 54, 0.1);
+    border: 1px solid rgba(244, 67, 54, 0.35);
+    border-radius: 6px;
+}
+
+.confirm-text {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: #e57373;
+    line-height: 1.5;
+}
+
+.confirm-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-confirm-delete {
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(244, 67, 54, 0.8);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-confirm-delete:hover {
+    background: #e53935;
+}
+
+.btn-cancel-delete {
+    padding: 4px 12px;
+    font-size: 12px;
+    background: transparent;
+    color: var(--fg-muted, #aaa);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-cancel-delete:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--fg);
+}
+
+/* ── Error banner ── */
+.model-error-banner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    background: rgba(244, 67, 54, 0.12);
+    border: 1px solid rgba(244, 67, 54, 0.35);
+    border-radius: 6px;
+    font-size: 12px;
+    color: #e57373;
+}
+
+/* model card states during pull/delete */
+.model-card.pulling,
+.model-card.deleting {
+    cursor: default;
+    /* Do NOT set pointer-events:none here — that would block the cancel button.
+       The card onClick handler already guards against isPulling/isDeleting. */
+}
+
+.model-card.pulling .model-card-header,
+.model-card.deleting .model-card-header {
+    opacity: 0.7;
+}
+
+/* Keep card body non-interactive except for explicit action buttons */
+.model-card.pulling .model-desc,
+.model-card.pulling .model-specs,
+.model-card.deleting .model-desc,
+.model-card.deleting .model-specs {
+    pointer-events: none;
+    user-select: none;
+}
+
+
+
 /* ===== Voice Selector ===== */
 .voice-selector {
     width: 560px;
