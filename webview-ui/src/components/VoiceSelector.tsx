@@ -25,6 +25,7 @@ import {
     subscribeVoiceWarmed,
     getWarmedKokoroVoices,
     startKokoroEngine,
+    isKokoroEverActivated,
 } from '../voice/ttsManager';
 
 interface VoiceSelectorProps {
@@ -282,7 +283,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                             <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 seconds to process). Still in BETA stage.</p>
                         </p>
 
-                        {kokoroState.status === 'idle' && (
+                        {kokoroState.status === 'idle' && !isKokoroEverActivated() && (
                             <div className="kokoro-activate-card">
                                 <div className="kokoro-activate-header">
                                     <Icon name="aiMagic" />

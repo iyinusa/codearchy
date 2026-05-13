@@ -15,3 +15,18 @@ webview-ui/kokoro-model/**
 scripts/**
 test-profile/**
 test-extensions/**
+
+# Exclude compiled test suite — tests have no role in a production extension
+out/test/**
+
+# Exclude webview build tooling — only webview-ui/dist/ is needed at runtime
+webview-ui/esbuild.js
+webview-ui/package.json
+webview-ui/package-lock.json
+webview-ui/tsconfig.json
+
+# Exclude the FP32 WebGPU model (~310 MB) — the INT8 WASM model
+# (model_quantized.onnx) handles all synthesis. GPU mode activates
+# automatically if model.onnx is present locally (run download-kokoro
+# manually to enable it), but it is not needed for the packaged extension.
+webview-ui/dist/kokoro-model/**/model.onnx

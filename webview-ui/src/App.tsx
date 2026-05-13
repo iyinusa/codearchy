@@ -15,7 +15,7 @@ import { VoiceSelector } from './components/VoiceSelector';
 import { ChatPanel } from './components/ChatPanel';
 import { Icon } from './components/Icons';
 import { useStoryPlayer } from './components/useStoryPlayer';
-import { subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId, startKokoroEngine } from './voice/ttsManager';
+import { subscribeSynthesizing, synthesizeKokoroAudio, isKokoroActive, getActiveKokoroVoiceId, startKokoroEngine, subscribeGpuModelNeeded, updateGpuDownloadProgress, completeGpuModelDownload, isKokoroEverActivated } from './voice/ttsManager';
 import {
     setProjectId,
     getProjectId,
@@ -80,13 +80,14 @@ export function App() {
 
     // Pre-load Kokoro eagerly in the background on every webview mount.
     // The model is pre-bundled with the extension so no internet is needed.
-    // Using a short delay so the initial render and graph data load complete
-    // before the worker thread starts pulling the ONNX into memory.
-    // After the first activation browser-level caching makes reloads near-instant.
+    // If the user has activated Kokoro before (localStorage flag), start
+    // immediately — no delay needed, they already opted in. Otherwise use a
+    // short delay so the initial render and graph data load complete first.
     useEffect(() => {
+        const delay = isKokoroEverActivated() ? 0 : 1500;
         const timer = window.setTimeout(() => {
             void startKokoroEngine().catch(() => undefined);
-        }, 1500);
+        }, delay);
         return () => window.clearTimeout(timer);
     }, []);
 
@@ -387,11 +388,33 @@ export function App() {
                     })();
                     break;
                 }
+                case 'gpuModelDownloadProgress': {
+                    const prog = message.payload as { percent: number; receivedMB: number; totalMB: number };
+                    updateGpuDownloadProgress(prog.percent, prog.receivedMB, prog.totalMB);
+                    break;
+                }
+                case 'gpuModelDownloadComplete': {
+                    const result = message.payload as { success: boolean; error?: string };
+                    completeGpuModelDownload(result.success, result.error);
+                    break;
+                }
             }
         };
         window.addEventListener('message', handler);
+
+        // Subscribe to GPU model needed events so we can trigger a download
+        // via the extension host when the Kokoro worker detects WebGPU but
+        // model.onnx is absent.  completeGpuModelDownload (called when the
+        // host reports gpuModelDownloadComplete) will unblock the worker.
+        const unsubGpu = subscribeGpuModelNeeded(() => {
+            postMessage('downloadGpuModel', {});
+        });
+
         postMessage('ready');
-        return () => window.removeEventListener('message', handler);
+        return () => {
+            window.removeEventListener('message', handler);
+            unsubGpu();
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 

@@ -24,11 +24,36 @@ import {
     playKokoroPcm,
     subscribeVoiceWarmed,
     getWarmedVoices,
+    setGpuModelNeededCallback,
+    notifyGpuModelReady,
     type KokoroAudio,
     type KokoroInitProgress,
 } from './kokoroTTS';
 import { subscribeVoiceConfig } from './voiceConfig';
 import { DEFAULT_KOKORO_VOICE } from './kokoroVoices';
+import { postMessage } from '../vscode';
+
+// ── Activation persistence ──────────────────────────────────────────────────
+//
+// Once Kokoro loads successfully for the first time we send a message to the
+// extension host, which stores a flag in `context.globalState` (persists across
+// VS Code restarts). On every subsequent webview load the host injects
+// `window.CODEARCHY_KOKORO_ACTIVATED = true` so we can:
+//   1. Auto-start immediately (no 1.5 s delay) — the user already opted in.
+//   2. Skip the "Activate Kokoro" card in VoiceSelector.
+//
+// NOTE: We do NOT use localStorage for this because VS Code WebViews get a
+// fresh browsing context on every restart — localStorage is ephemeral.
+
+declare global {
+    interface Window { CODEARCHY_KOKORO_ACTIVATED?: boolean; }
+}
+
+/** Returns true if the extension host injected the "previously activated" flag,
+ *  meaning the user has successfully run Kokoro at least once on this machine. */
+export function isKokoroEverActivated(): boolean {
+    return window.CODEARCHY_KOKORO_ACTIVATED === true;
+}
 
 // ── Text sanitiser ──────────────────────────────────────────────────────────
 
@@ -165,9 +190,12 @@ function setKokoroStatus(status: KokoroStatus, error: string | null = null): voi
 
 function setKokoroProgress(p: KokoroInitProgress): void {
     if (kokoroStatus !== 'loading') return;
+    // When in GPU download phase, worker progress maps to 50–100% range so
+    // the bar doesn't jump backwards after the download completes.
+    const mapped = gpuDownloadPhase ? 50 + Math.round(p.percent * 0.5) : p.percent;
     // Progress is monotonic — never let stale events drag the bar backwards.
-    if (p.percent < kokoroProgress) return;
-    kokoroProgress = p.percent;
+    if (mapped < kokoroProgress) return;
+    kokoroProgress = mapped;
     kokoroStage = p.stage;
     kokoroFile = p.file ?? null;
     emitKokoro();
@@ -195,6 +223,103 @@ export function getWarmedKokoroVoices(): ReadonlySet<string> {
     return getWarmedVoices();
 }
 
+// ── GPU model on-demand download ────────────────────────────────────────────
+//
+// When Kokoro detects WebGPU but model.onnx is absent, the worker posts
+// `gpuModelNeeded`.  ttsManager intercepts this and fires the registered
+// listeners so App.tsx can send a `DownloadGpuModel` message to the extension
+// host.  Each listener receives the `notifyWorker(ok)` function it must call
+// once the download has succeeded or failed.
+
+/** True while the GPU model is being downloaded (download is phase 1 of init). */
+let gpuDownloadPhase = false;
+
+/**
+ * Listeners notified when the worker requires a GPU model download.
+ * Each listener receives a `notifyWorker(ok: boolean)` function it must call
+ * to unblock the worker once the download is complete.
+ */
+const gpuModelDownloadListeners = new Set<(notifyWorker: (ok: boolean) => void) => void>();
+
+/**
+ * Subscribe to GPU model needed events.  Fires when the Kokoro worker detects
+ * WebGPU but model.onnx is absent and needs to be downloaded.
+ *
+ * The listener receives a `notifyWorker(ok)` callback it MUST invoke when the
+ * download completes or fails.  Call it with `true` on success and `false` on
+ * failure/cancellation to unblock the worker.
+ *
+ * Returns an unsubscribe function.
+ */
+export function subscribeGpuModelNeeded(
+    listener: (notifyWorker: (ok: boolean) => void) => void,
+): () => void {
+    gpuModelDownloadListeners.add(listener);
+    return () => { gpuModelDownloadListeners.delete(listener); };
+}
+
+/**
+ * Push a GPU model download progress update into the Kokoro status stream.
+ * The existing VoiceSelector progress bar and stage text will reflect the
+ * download automatically — no new UI components needed.
+ *
+ * @param percent    Overall download progress, 0–100.
+ * @param receivedMB Bytes received so far, converted to MB.
+ * @param totalMB    Total file size in MB (may be 0 if Content-Length unknown).
+ */
+export function updateGpuDownloadProgress(
+    percent: number,
+    receivedMB: number,
+    totalMB: number,
+): void {
+    if (kokoroStatus !== 'loading') return;
+    gpuDownloadPhase = true;
+    // Map download progress to 0–50% of the combined bar.
+    kokoroProgress = Math.round(percent * 0.5);
+    kokoroStage = totalMB > 0
+        ? `Downloading GPU model (${receivedMB.toFixed(0)} / ${totalMB.toFixed(0)}\u00a0MB)`
+        : `Downloading GPU model (${receivedMB.toFixed(0)}\u00a0MB)`;
+    kokoroFile = 'model.onnx — FP32 WebGPU (~310\u00a0MB)';
+    emitKokoro();
+}
+
+/**
+ * Called by App.tsx after the extension host completes (or fails) the GPU model
+ * download.  Updates the status UI and unblocks the worker.
+ *
+ * On success the worker resumes its GPU init (model loading progress will be
+ * shown in the 50–100% range).  On failure the worker falls through to WASM.
+ *
+ * @param success Whether the download completed successfully.
+ * @param error   Optional human-readable error message when success is false.
+ */
+export function completeGpuModelDownload(success: boolean, error?: string): void {
+    if (success) {
+        // Keep gpuDownloadPhase = true so subsequent worker initProgress events
+        // are mapped to the 50–100% range.  Set bar to 50% and update stage.
+        gpuDownloadPhase = true;
+        if (kokoroStatus === 'loading') {
+            kokoroProgress = 50;
+            kokoroStage = 'GPU model ready — loading into VRAM…';
+            kokoroFile = null;
+            emitKokoro();
+        }
+    } else {
+        // Download failed — worker will fall back to WASM; reset phase flag
+        // so WASM progress uses the full 0–100% range.
+        gpuDownloadPhase = false;
+        if (kokoroStatus === 'loading') {
+            kokoroProgress = 0;
+            kokoroStage = error
+                ? `GPU download failed: ${error} — using CPU mode`
+                : 'GPU download failed — falling back to CPU mode';
+            kokoroFile = null;
+            emitKokoro();
+        }
+    }
+    notifyGpuModelReady(success);
+}
+
 /** Boot the Kokoro worker. Idempotent — safe to call multiple times. */
 export function startKokoroEngine(): Promise<void> {
     if (kokoroStatus === 'ready') return Promise.resolve();
@@ -206,6 +331,22 @@ export function startKokoroEngine(): Promise<void> {
             });
         });
     }
+    // Reset GPU download phase flag each time we start a fresh init.
+    gpuDownloadPhase = false;
+    // Register the GPU model needed callback BEFORE starting init so it's in
+    // place when the worker posts gpuModelNeeded during its init flow.
+    setGpuModelNeededCallback((notifyWorker: (ok: boolean) => void) => {
+        if (kokoroStatus === 'loading') {
+            // Hold kokoroProgress at 0; show descriptive stage text.
+            kokoroStage = 'GPU model not found — preparing download…';
+            kokoroFile = 'model.onnx (FP32, ~310 MB)';
+            emitKokoro();
+        }
+        // Propagate to any App.tsx subscriber that will trigger the download.
+        gpuModelDownloadListeners.forEach(l => {
+            try { l(notifyWorker); } catch { /* ignore */ }
+        });
+    });
     kokoroProgress = 0;
     kokoroStage = 'Activating';
     kokoroFile = null;
@@ -213,6 +354,11 @@ export function startKokoroEngine(): Promise<void> {
     return initKokoro(setKokoroProgress)
         .then(() => {
             setKokoroStatus('ready');
+            // Persist activation in the extension host globalState so future VS
+            // Code sessions know Kokoro has been activated and can auto-start.
+            // Also update the in-memory window flag for the rest of this session.
+            window.CODEARCHY_KOKORO_ACTIVATED = true;
+            postMessage('persistKokoroActivated');
             // Warm the user's currently-selected voice so their FIRST speak()
             // is instant. The worker also warms af_alloy during init; if the
             // user picked something else we need to warm that one too.
