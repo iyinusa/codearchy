@@ -23,6 +23,7 @@
         "AI",
         "Chat"
     ],
+    "icon": "media/icon.jpg",
     "activationEvents": [],
     "main": "./out/extension.js",
     "contributes": {
