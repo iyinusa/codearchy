@@ -1679,6 +1679,19 @@ body {
     white-space: nowrap;
 }
 
+/* Compact loading note shown for returning users — engine loads silently */
+.kokoro-loading-bg {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: var(--vscode-editor-inactiveSelectionBackground, rgba(128, 128, 128, .12));
+    font-size: 11px;
+    opacity: 0.7;
+    margin-bottom: 4px;
+}
+
 .kokoro-error-block {
     display: flex;
     flex-direction: column;

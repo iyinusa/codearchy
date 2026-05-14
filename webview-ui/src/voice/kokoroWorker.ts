@@ -386,6 +386,18 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
  * `warmVoice()` uses `inflightWarm` for deduplication, so if the main thread
  * requests a specific voice while the loop is warming a different one, the
  * request is fulfilled as soon as the current inference completes.
+ *
+ * IMPORTANT — macrotask yield between voices:
+ * ONNX/WASM inference is synchronous and blocks the worker's JS thread for
+ * the full duration of each warm (~10-25 s on CPU).  Without a yield, any
+ * `speak` message from the main thread queues behind ALL remaining warms,
+ * making the Test button appear stuck ("processing forever, no audio").
+ *
+ * `await yieldToMacrotaskQueue()` placed AFTER each warm schedules the next
+ * iteration as a fresh macrotask.  A `speak` message that arrived while the
+ * previous WASM call was running lands in the macrotask queue BEFORE this
+ * setTimeout(0) callback (FIFO), so it fires first — synthesis runs
+ * immediately, audio plays, then backgroundWarmAll resumes.
  */
 async function backgroundWarmAll(): Promise<void> {
     for (const v of ALL_ENGLISH_VOICES) {
@@ -400,6 +412,12 @@ async function backgroundWarmAll(): Promise<void> {
         if (warmedVoices.has(v)) {
             post({ type: 'warmed', voice: v });
         }
+        // Yield to the macrotask queue after every warm so any pending speak
+        // message can be processed before the next background inference starts.
+        // A speak message queued while the WASM was blocking arrives in the
+        // macrotask queue before this setTimeout callback (FIFO), so it fires
+        // first and synthesis runs without waiting for all remaining warms.
+        await new Promise<void>(r => setTimeout(r, 0));
     }
 }
 
