@@ -5,6 +5,21 @@ const fs = require('fs');
 const isWatch = process.argv.includes('--watch');
 
 /**
+ * Remove all files in dist/chunks/ before each build so that stale
+ * content-hashed chunks from previous builds (e.g. old kokoroEngine-*.js
+ * files after the chunk was renamed) do not accumulate and end up packaged
+ * in the VSIX.
+ */
+function cleanChunks() {
+    const chunksDir = path.join(__dirname, 'dist', 'chunks');
+    if (!fs.existsSync(chunksDir)) return;
+    for (const entry of fs.readdirSync(chunksDir)) {
+        try { fs.unlinkSync(path.join(chunksDir, entry)); } catch { /* ignore */ }
+    }
+    console.log('[esbuild] Cleaned dist/chunks/');
+}
+
+/**
  * Copy the ONNX Runtime Web wasm binary shipped by @huggingface/transformers
  * into dist/ort/ so ORT can fetch it from the webview's own origin.
  */
@@ -64,6 +79,9 @@ const workerOptions = {
 };
 
 async function build() {
+    // Always clean stale chunks before building so old content-hashed files
+    // from previous runs don't end up in the VSIX.
+    cleanChunks();
     if (isWatch) {
         const mainCtx = await esbuild.context(mainOptions);
         const workerCtx = await esbuild.context(workerOptions);

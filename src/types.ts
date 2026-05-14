@@ -168,6 +168,18 @@ export enum WebviewMessageType {
     /** Webview → host: persist voice configuration (e.g. kokoroActivated) in
      *  extension-host globalState so it survives full webview reloads. */
     VoiceConfigPersist = 'voiceConfigPersist',
+    // GPU model on-demand download (model.onnx, ~310 MB FP32 WebGPU)
+    /** Webview → host: GPU detected but model.onnx absent — begin download. */
+    DownloadGpuModel = 'downloadGpuModel',
+    /** Host → webview: streaming byte-level download progress. */
+    GpuModelDownloadProgress = 'gpuModelDownloadProgress',
+    /** Host → webview: download finished (success or failure). */
+    GpuModelDownloadComplete = 'gpuModelDownloadComplete',
+    /** Webview → host: user cancelled an in-progress GPU model download. */
+    CancelGpuModelDownload = 'cancelGpuModelDownload',
+    /** Webview → host: Kokoro engine loaded successfully — persist flag so next
+     *  VS Code session can auto-start without the activation prompt. */
+    PersistKokoroActivated = 'persistKokoroActivated',
 }
 
 export interface AnalysisProgress {

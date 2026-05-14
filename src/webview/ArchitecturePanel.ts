@@ -43,6 +43,8 @@ export class ArchitecturePanel {
    *  binary files (the ~82 MB ONNX) when fetched from a blob: worker context. */
   private modelServer: http.Server | null = null;
   private modelServerPort = 0;
+  /** AbortController used to cancel an in-progress GPU model download. */
+  private gpuModelDownloadAbort: AbortController | null = null;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
     this.panel = panel;
@@ -282,6 +284,23 @@ export class ArchitecturePanel {
         }
         break;
       }
+
+      case WebviewMessageType.DownloadGpuModel:
+        // Fire-and-forget — handleDownloadGpuModel streams progress back and
+        // sends a GpuModelDownloadComplete when done.
+        this.handleDownloadGpuModel();
+        break;
+
+      case WebviewMessageType.CancelGpuModelDownload:
+        this.gpuModelDownloadAbort?.abort();
+        break;
+
+      case WebviewMessageType.PersistKokoroActivated:
+        // Webview tells us Kokoro loaded successfully — store a persistent flag
+        // in globalState so future sessions can auto-start without the activation
+        // prompt. globalState survives VS Code restarts and extension updates.
+        void this.extensionContext.globalState.update('codearchy.kokoroActivated', true);
+        break;
 
       case WebviewMessageType.GenerateNarrator: {
         const narratorPayload = message.payload as {
@@ -938,12 +957,165 @@ export class ArchitecturePanel {
     ArchitecturePanel.instance = undefined;
     this.ollamaService.dispose();
     this.hostRecorder.cancel();
+    this.gpuModelDownloadAbort?.abort();
     this.modelServer?.close();
     this.modelServer = null;
     this.panel.dispose();
     while (this.disposables.length) {
       const d = this.disposables.pop();
       if (d) d.dispose();
+    }
+  }
+
+  // --- GPU Model On-Demand Download ---
+
+  /**
+   * Downloads the FP32 WebGPU Kokoro model (model.onnx, ~310 MB) from
+   * HuggingFace into the extension's writable local model server directory.
+   *
+   * The model server already serves from `webview-ui/dist/kokoro-model/`; we
+   * write the file there so the worker's fetch shim finds it at the expected
+   * URL path on the next (and all future) GPU load attempts.
+   *
+   * Streams download progress back to the webview via GpuModelDownloadProgress
+   * messages and sends GpuModelDownloadComplete when done.
+   */
+  private async handleDownloadGpuModel(): Promise<void> {
+    // Cancel any previous in-flight download before starting a new one.
+    this.gpuModelDownloadAbort?.abort();
+    this.gpuModelDownloadAbort = new AbortController();
+    const signal = this.gpuModelDownloadAbort.signal;
+
+    const HF_URL =
+      'https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx';
+
+    // Destination: the same path the model server already serves.
+    // webview-ui/dist/ is writable in both dev and packaged installs.
+    const destDir = path.join(
+      this.extensionUri.fsPath,
+      'webview-ui', 'dist', 'kokoro-model',
+      'onnx-community', 'Kokoro-82M-v1.0-ONNX', 'onnx',
+    );
+    const destFile = path.join(destDir, 'model.onnx');
+    const tmpFile = destFile + '.download';
+
+    try {
+      fs.mkdirSync(destDir, { recursive: true });
+    } catch (err) {
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.GpuModelDownloadComplete,
+        payload: { success: false, error: `Cannot create model directory: ${err instanceof Error ? err.message : String(err)}` },
+      });
+      return;
+    }
+
+    // Use Node.js https with manual redirect following so we handle
+    // HuggingFace's CDN redirects transparently.
+    const downloadWithRedirects = (url: string, redirects = 0): Promise<void> => {
+      return new Promise<void>((resolve, reject) => {
+        if (redirects > 10) { reject(new Error('Too many redirects')); return; }
+
+        const parsedUrl = new URL(url);
+        const isHttps = parsedUrl.protocol === 'https:';
+        const transport = isHttps ? require('https') : require('http');
+
+        const req = transport.get(url, { signal }, (res: import('http').IncomingMessage) => {
+          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            // Follow redirect.
+            res.resume(); // drain response body
+            const nextUrl = new URL(res.headers.location, url).href;
+            resolve(downloadWithRedirects(nextUrl, redirects + 1));
+            return;
+          }
+
+          if (res.statusCode !== 200) {
+            res.resume();
+            reject(new Error(`HTTP ${res.statusCode} from ${url}`));
+            return;
+          }
+
+          const totalBytes = parseInt(res.headers['content-length'] ?? '0', 10);
+          const totalMB = totalBytes > 0 ? totalBytes / (1024 * 1024) : 0;
+          let receivedBytes = 0;
+          let lastReportedPercent = -1;
+
+          const tmpStream = fs.createWriteStream(tmpFile);
+
+          res.on('data', (chunk: Buffer) => {
+            receivedBytes += chunk.length;
+            tmpStream.write(chunk);
+
+            if (totalBytes > 0) {
+              const percent = Math.round((receivedBytes / totalBytes) * 100);
+              // Throttle: only post when percent crosses a whole-number boundary.
+              if (percent !== lastReportedPercent) {
+                lastReportedPercent = percent;
+                const receivedMB = receivedBytes / (1024 * 1024);
+                this.panel.webview.postMessage({
+                  type: WebviewMessageType.GpuModelDownloadProgress,
+                  payload: { percent, receivedMB, totalMB },
+                });
+              }
+            } else {
+              // Content-Length unknown: report MB received only.
+              const receivedMB = receivedBytes / (1024 * 1024);
+              const reportInterval = Math.floor(receivedMB) !== Math.floor((receivedBytes - chunk.length) / (1024 * 1024));
+              if (reportInterval) {
+                this.panel.webview.postMessage({
+                  type: WebviewMessageType.GpuModelDownloadProgress,
+                  payload: { percent: 0, receivedMB, totalMB: 0 },
+                });
+              }
+            }
+          });
+
+          res.on('end', () => {
+            tmpStream.end(() => {
+              try {
+                fs.renameSync(tmpFile, destFile);
+                resolve();
+              } catch (renameErr) {
+                reject(renameErr);
+              }
+            });
+          });
+
+          res.on('error', (err: Error) => {
+            tmpStream.destroy();
+            try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+            reject(err);
+          });
+
+          signal.addEventListener('abort', () => {
+            req.destroy();
+            tmpStream.destroy();
+            try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+            reject(new Error('Download cancelled'));
+          }, { once: true });
+        });
+
+        req.on('error', (err: Error) => {
+          try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+          reject(err);
+        });
+      });
+    };
+
+    try {
+      await downloadWithRedirects(HF_URL);
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.GpuModelDownloadComplete,
+        payload: { success: true },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const cancelled = message === 'Download cancelled';
+      this.panel.webview.postMessage({
+        type: WebviewMessageType.GpuModelDownloadComplete,
+        payload: { success: false, error: cancelled ? undefined : message },
+      });
+    } finally {
+      this.gpuModelDownloadAbort = null;
     }
   }
 
@@ -1073,7 +1245,7 @@ export class ArchitecturePanel {
 </head>
 <body>
   <div id="root"></div>
-  <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}"; window.CODEARCHY_ORT_BASE_URI = "${ortBaseUri}/"; window.CODEARCHY_KOKORO_MODEL_BASE_URI = "${kokoroModelBaseUri}/"; window.CODEARCHY_KOKORO_WORKER_URI = "${kokoroWorkerUri}"; window.__CODEARCHY_VOICE_CONFIG = ${JSON.stringify(this.extensionContext.globalState.get<object>('codearchy.voiceConfig') ?? {})};</script>
+  <script nonce="${nonce}">window.CODEARCY_ICON_URI = "${iconUri}"; window.CODEARCHY_ORT_BASE_URI = "${ortBaseUri}/"; window.CODEARCHY_KOKORO_MODEL_BASE_URI = "${kokoroModelBaseUri}/"; window.CODEARCHY_KOKORO_WORKER_URI = "${kokoroWorkerUri}"; window.CODEARCHY_KOKORO_ACTIVATED = ${this.extensionContext.globalState.get<boolean>('codearchy.kokoroActivated') === true ? 'true' : 'false'}; window.__CODEARCHY_VOICE_CONFIG = ${JSON.stringify(this.extensionContext.globalState.get<object>('codearchy.voiceConfig') ?? {})};</script>
   <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

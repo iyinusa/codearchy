@@ -43,9 +43,14 @@ const MODEL_FILES = [
     'tokenizer_config.json',
     // CPU/WASM backend — always downloaded, always used as fallback.
     'onnx/model_quantized.onnx',
-    // GPU/WebGPU backend — optional but strongly recommended for performance.
-    // If you skip this (~330 MB), the extension works fine on CPU/WASM.
-    'onnx/model.onnx',
+    // GPU/WebGPU backend (model.onnx, ~330 MB FP32) is intentionally NOT
+    // downloaded here because it is excluded from the packaged VSIX via
+    // .vscodeignore.  The worker gracefully falls back to WASM when this
+    // file is absent.
+    //
+    // To enable local GPU-accelerated TTS for development, uncomment the
+    // line below and re-run `npm run download-kokoro`:
+    // 'onnx/model.onnx',
 ];
 
 // All English voices bundled with kokoro-js (American + British, F + M).

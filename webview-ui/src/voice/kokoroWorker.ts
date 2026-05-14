@@ -58,7 +58,11 @@ type WorkerMsg =
     | { type: 'warm'; voice: string }
     | { type: 'speak'; id: number; text: string; voice?: string }
     | { type: 'generate'; id: number; text: string; voice?: string }
-    | { type: 'stop' };
+    | { type: 'stop' }
+    /** Main thread → worker: GPU model download completed successfully. */
+    | { type: 'gpuModelReady' }
+    /** Main thread → worker: GPU model download failed; fall back to WASM. */
+    | { type: 'gpuModelFailed' };
 
 function post(data: unknown, transfer?: Transferable[]): void {
     (self as unknown as { postMessage(d: unknown, t?: Transferable[]): void })
@@ -72,6 +76,21 @@ const inflightWarm = new Map<string, Promise<void>>();
 
 /** The backend that successfully initialised the model. Sent in 'ready'. */
 let activeDevice: 'webgpu' | 'wasm' = 'wasm';
+
+/**
+ * Resolve function set when the worker is waiting for the main thread to
+ * complete a GPU model download.  The init flow posts { type:'gpuModelNeeded' }
+ * and suspends here until { type:'gpuModelReady' } or { type:'gpuModelFailed' }
+ * arrives.  Only one download can be in-flight at a time.
+ */
+let gpuModelSignalResolve: ((ok: boolean) => void) | null = null;
+
+/** Returns a Promise that resolves true (ready) or false (failed/cancelled). */
+function waitForGpuModelSignal(): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+        gpuModelSignalResolve = resolve;
+    });
+}
 
 /**
  * Returns true if WebGPU is available in this worker context.
@@ -225,8 +244,8 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
     // Encapsulates one attempt to load the model with a given dtype/device.
     // fileTotals is reset on each call so retry progress starts clean.
     const loadModel = async (
-        dtype: string,
-        device: string,
+        dtype: 'fp32' | 'q8' | 'fp16' | 'q4' | 'q4f16',
+        device: 'webgpu' | 'wasm' | 'cpu',
         label: string,
     ): Promise<KokoroTTS> => {
         const fileTotals = new Map<string, { loaded: number; total: number }>();
@@ -303,16 +322,41 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
     const gpuAvailable = await detectWebGPU();
 
     if (gpuAvailable) {
-        reportProgress(0, 'Loading neural model (GPU)');
+        // Before attempting the full FP32 model load (310 MB), probe with a
+        // lightweight HEAD request to confirm the file is present on the local
+        // model server.  If absent, notify the main thread so it can download
+        // the file from HuggingFace, then wait for the download to finish.
+        let gpuModelPresent = false;
         try {
-            tts = await loadModel('fp32', 'webgpu', 'Loading neural model (GPU)');
-            activeDevice = 'webgpu';
+            const probeUrl = modelBase.endsWith('/') ? modelBase + 'onnx/model.onnx' : modelBase + '/onnx/model.onnx';
+            const probe = await fetch(probeUrl, { method: 'HEAD' });
+            gpuModelPresent = probe.ok;
         } catch {
-            // Most likely cause: model.onnx not downloaded yet (HTTP 404 from
-            // local model server).  Run download-kokoro.js to enable GPU mode.
-            // Falls through to WASM below.
-            tts = null;
+            gpuModelPresent = false;
+        }
+
+        if (!gpuModelPresent) {
+            // Notify main thread that GPU model download is needed.
+            // The main thread will stream download progress back and then
+            // send { type:'gpuModelReady' } or { type:'gpuModelFailed' }.
+            reportProgress(0, 'GPU model not found — requesting download');
+            post({ type: 'gpuModelNeeded' });
+            gpuModelPresent = await waitForGpuModelSignal();
+            // Reset progress counter so the model-load progress bar starts fresh.
             lastReportedPercent = -1;
+        }
+
+        if (gpuModelPresent) {
+            reportProgress(0, 'Loading neural model (GPU)');
+            try {
+                tts = await loadModel('fp32', 'webgpu', 'Loading neural model (GPU)');
+                activeDevice = 'webgpu';
+            } catch {
+                // GPU load failed even though model.onnx is present —
+                // likely a WebGPU driver issue.  Fall through to WASM.
+                tts = null;
+                lastReportedPercent = -1;
+            }
         }
     }
 
@@ -342,6 +386,18 @@ async function init(modelBase: string, ortBase: string): Promise<void> {
  * `warmVoice()` uses `inflightWarm` for deduplication, so if the main thread
  * requests a specific voice while the loop is warming a different one, the
  * request is fulfilled as soon as the current inference completes.
+ *
+ * IMPORTANT — macrotask yield between voices:
+ * ONNX/WASM inference is synchronous and blocks the worker's JS thread for
+ * the full duration of each warm (~10-25 s on CPU).  Without a yield, any
+ * `speak` message from the main thread queues behind ALL remaining warms,
+ * making the Test button appear stuck ("processing forever, no audio").
+ *
+ * `await yieldToMacrotaskQueue()` placed AFTER each warm schedules the next
+ * iteration as a fresh macrotask.  A `speak` message that arrived while the
+ * previous WASM call was running lands in the macrotask queue BEFORE this
+ * setTimeout(0) callback (FIFO), so it fires first — synthesis runs
+ * immediately, audio plays, then backgroundWarmAll resumes.
  */
 async function backgroundWarmAll(): Promise<void> {
     for (const v of ALL_ENGLISH_VOICES) {
@@ -356,6 +412,12 @@ async function backgroundWarmAll(): Promise<void> {
         if (warmedVoices.has(v)) {
             post({ type: 'warmed', voice: v });
         }
+        // Yield to the macrotask queue after every warm so any pending speak
+        // message can be processed before the next background inference starts.
+        // A speak message queued while the WASM was blocking arrives in the
+        // macrotask queue before this setTimeout callback (FIFO), so it fires
+        // first and synthesis runs without waiting for all remaining warms.
+        await new Promise<void>(r => setTimeout(r, 0));
     }
 }
 
@@ -537,6 +599,15 @@ self.onmessage = async (ev: MessageEvent<WorkerMsg>) => {
             );
         } else if (msg.type === 'stop') {
             stopFlag++;
+        } else if (msg.type === 'gpuModelReady') {
+            // Download completed successfully — unblock the init() await.
+            gpuModelSignalResolve?.(true);
+            gpuModelSignalResolve = null;
+        } else if (msg.type === 'gpuModelFailed') {
+            // Download failed or was cancelled — unblock init() with false
+            // so it falls through to the WASM path.
+            gpuModelSignalResolve?.(false);
+            gpuModelSignalResolve = null;
         }
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

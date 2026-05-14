@@ -28,6 +28,23 @@ let readyPromise: Promise<void> | null = null;
 let activeInitProgress: ((p: KokoroInitProgress) => void) | null = null;
 let audioCtx: AudioContext | null = null;
 
+// Keep the AudioContext unlocked in VS Code's Electron WebView.
+// Electron's autoplay policy can block ctx.resume() even when called from
+// within a React synthetic-event handler — the gesture-stack check is more
+// restrictive than standard Chrome. Attaching a capture-phase listener means
+// we fire *before* React's event system, so the context is already 'running'
+// by the time kokoroSpeak() or playPcm() is reached. This is the standard
+// "audio unlock on first gesture" pattern required by many Electron apps.
+if (typeof document !== 'undefined') {
+    const _unlockCtx = (): void => {
+        if (audioCtx && audioCtx.state === 'suspended') {
+            audioCtx.resume().catch(() => { /* ignore */ });
+        }
+    };
+    document.addEventListener('click', _unlockCtx, true);
+    document.addEventListener('keydown', _unlockCtx, true);
+}
+
 /** The inference backend the worker selected: 'webgpu' (GPU) or 'wasm' (CPU). */
 let kokoroDevice: 'webgpu' | 'wasm' = 'wasm';
 
@@ -124,7 +141,17 @@ async function playPcm(pcm: Float32Array, sampleRate: number, myStop: number): P
     // scheduled on a running context. Without this, source.onended never fires
     // in a packaged extension and the speak Promise hangs indefinitely.
     if (ctx.state !== 'running') {
-        try { await ctx.resume(); } catch { /* ignore — context may be irreparably closed */ }
+        try {
+            // Race against a 500 ms timeout so playPcm() never hangs
+            // indefinitely if Electron's WebView blocks ctx.resume()
+            // (e.g. policy changed between gesture and chunk arrival).
+            // The guard timer below is the final safety net if audio still
+            // doesn't play after this.
+            await Promise.race([
+                ctx.resume(),
+                new Promise<void>(r => window.setTimeout(r, 500)),
+            ]);
+        } catch { /* ignore — context may be irreparably closed */ }
     }
     if (stopFlag !== myStop) return;
     return new Promise<void>((resolve) => {
@@ -186,6 +213,7 @@ function emitSynthState(synthesizing: boolean): void {
 type WorkerOut =
     | { type: 'ready'; device?: 'webgpu' | 'wasm' }
     | { type: 'initProgress'; percent: number; stage: string; file?: string }
+    | { type: 'gpuModelNeeded' }
     | { type: 'warmed'; voice: string }
     | { type: 'chunk'; id: number; pcm: Float32Array; sampleRate: number }
     | { type: 'end'; id: number }
@@ -198,6 +226,29 @@ export interface KokoroInitProgress {
     percent: number;   // 0..100
     stage: string;     // human-readable label
     file?: string;     // optional file currently being loaded
+}
+
+/**
+ * Registered by ttsManager to receive notification when the worker detects
+ * that the GPU model (model.onnx) is missing and needs to be downloaded.
+ * The callback receives a function the caller should invoke once the download
+ * has completed (pass true) or failed/was cancelled (pass false).
+ */
+let gpuModelNeededCb: ((notifyReady: (ok: boolean) => void) => void) | null = null;
+
+/** Register the GPU-model-needed callback.  Only one can be active at once. */
+export function setGpuModelNeededCallback(
+    cb: (notifyReady: (ok: boolean) => void) => void,
+): void {
+    gpuModelNeededCb = cb;
+}
+
+/**
+ * Tell the Kokoro worker whether the GPU model download succeeded.
+ * Called by ttsManager after the extension host finishes (or fails) the download.
+ */
+export function notifyGpuModelReady(success: boolean): void {
+    worker?.postMessage({ type: success ? 'gpuModelReady' : 'gpuModelFailed' });
 }
 
 function onWorkerMessage(ev: MessageEvent<WorkerOut>): void {
@@ -361,6 +412,20 @@ export function initKokoro(onProgress?: (p: KokoroInitProgress) => void): Promis
                         if (cb) {
                             try { cb({ percent: ev.data.percent, stage: ev.data.stage, file: ev.data.file }); }
                             catch { /* ignore */ }
+                        }
+                        return;
+                    }
+                    if (ev.data.type === 'gpuModelNeeded') {
+                        // Worker is waiting for the GPU model to be downloaded.
+                        // Delegate to the registered callback (set by ttsManager).
+                        // The callback receives a resolver it must call when done.
+                        const cb = gpuModelNeededCb;
+                        if (cb) {
+                            try { cb((ok: boolean) => { notifyGpuModelReady(ok); }); }
+                            catch { /* ignore */ }
+                        } else {
+                            // No handler registered — tell worker to fall back to WASM.
+                            notifyGpuModelReady(false);
                         }
                         return;
                     }

@@ -25,6 +25,7 @@ import {
     subscribeVoiceWarmed,
     getWarmedKokoroVoices,
     startKokoroEngine,
+    isKokoroEverActivated,
 } from '../voice/ttsManager';
 
 interface VoiceSelectorProps {
@@ -105,7 +106,6 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
 
     const handleSelectVoice = (option: VoiceOption) => {
         if (option.engine === 'kokoro' && kokoroState.status !== 'ready') return;
-        if (option.engine === 'kokoro' && !kokoroWarmed.has(option.id)) return;
         setVoiceConfig({ engine: option.engine, voiceId: option.id });
     };
 
@@ -118,7 +118,6 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
             return;
         }
         if (option.engine === 'kokoro' && kokoroState.status !== 'ready') return;
-        if (option.engine === 'kokoro' && !kokoroWarmed.has(option.id)) return;
 
         setTestingVoiceId(option.id);
         const prev = getVoiceConfig();
@@ -142,7 +141,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 setVoiceConfig({ engine: prev.engine, voiceId: prev.voiceId });
             }
         }
-    }, [testingVoiceId, kokoroState.status, kokoroWarmed]);
+    }, [testingVoiceId, kokoroState.status]);
 
     // Auto-default the Kokoro voice once the engine becomes ready and the
     // user is on the Kokoro tab without a Kokoro voice selected.
@@ -158,7 +157,12 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
     const renderVoiceList = (engine: VoiceEngineId) => {
         const list: VoiceOption[] = engine === 'kokoro' ? KOKORO_VOICES : webVoiceOptions;
         // Engine not yet ready (loading / idle / error) — all cards disabled.
-        const engineNotReady = engine === 'kokoro' && kokoroState.status !== 'ready';
+        // Exception: when the user has previously activated Kokoro, the engine is
+        // loading silently in the background; keep cards enabled so the user can
+        // select a voice immediately and test it the moment loading finishes.
+        const engineNotReady = engine === 'kokoro'
+            && kokoroState.status !== 'ready'
+            && !(kokoroState.status === 'loading' && isKokoroEverActivated());
 
         if (list.length === 0) {
             return (
@@ -174,11 +178,14 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 {list.map((option) => {
                     const selected = config.engine === engine && config.voiceId === option.id;
                     const testing = testingVoiceId === option.id;
-                    // A Kokoro voice is "warming" when the engine is ready but the
-                    // worker hasn't finished the background warm inference for it yet.
+                    // A voice is "warming" when the engine is ready but the worker
+                    // hasn't yet finished the background warm inference for it.
+                    // We gate the Test button to avoid cold-inference slowness while
+                    // keeping the card itself fully visible and selectable.
                     const warming = engine === 'kokoro'
                         && kokoroState.status === 'ready'
                         && !kokoroWarmed.has(option.id);
+                    // Disabled when engine not ready OR this specific voice is still warming.
                     const isDisabled = engineNotReady || warming;
                     return (
                         <div
@@ -186,16 +193,14 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                             className={[
                                 'voice-card',
                                 selected ? 'selected' : '',
-                                isDisabled ? 'disabled' : '',
-                                warming ? 'warming' : '',
+                                isDisabled && !warming ? 'disabled' : '',
                             ].filter(Boolean).join(' ')}
                             onClick={() => !isDisabled && handleSelectVoice(option)}
                         >
                             <div className="voice-card-main">
                                 <div className="voice-card-title">
                                     <span className="voice-card-name">{option.label}</span>
-                                    {selected && !warming && <span className="voice-active-badge">Active</span>}
-                                    {warming && <span className="voice-warming-badge">Warming…</span>}
+                                    {selected && <span className="voice-active-badge">Active</span>}
                                 </div>
                                 {(option.lang || option.description) && (
                                     <div className="voice-card-meta">
@@ -208,13 +213,13 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                 className={`voice-test-btn ${testing ? 'testing' : ''}`}
                                 onClick={(e) => { e.stopPropagation(); if (!isDisabled) handleTest(option); }}
                                 disabled={isDisabled}
-                                title={warming ? 'Voice warming up…' : (testing ? 'Stop preview' : 'Preview voice')}
+                                title={warming ? 'Preparing voice…' : (testing ? 'Stop preview' : 'Preview voice')}
                             >
                                 <Icon
                                     name={warming ? 'spinner' : (testing ? 'stopAction' : 'speakAloud')}
                                     spin={warming}
                                 />
-                                <span>{warming ? 'Warming' : (testing ? 'Stop' : 'Test')}</span>
+                                <span>{testing ? 'Stop' : 'Test'}</span>
                             </button>
                         </div>
                     );
@@ -255,7 +260,9 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                 {kokoroState.status === 'ready'
                                     ? 'Neural · Offline · Pre-bundled'
                                     : kokoroState.status === 'loading'
-                                        ? `Activating… ${kokoroState.progress}%`
+                                        ? isKokoroEverActivated()
+                                            ? `Loading in background… ${kokoroState.progress}%`
+                                            : `Activating… ${kokoroState.progress}%`
                                         : kokoroState.status === 'error'
                                             ? 'Engine error — see details'
                                             : 'Neural · Offline · Tap Activate'}
@@ -282,7 +289,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                             <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 seconds to process). Still in BETA stage.</p>
                         </p>
 
-                        {kokoroState.status === 'idle' && (
+                        {kokoroState.status === 'idle' && !isKokoroEverActivated() && (
                             <div className="kokoro-activate-card">
                                 <div className="kokoro-activate-header">
                                     <Icon name="aiMagic" />
@@ -308,7 +315,7 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                             </div>
                         )}
 
-                        {kokoroState.status === 'loading' && (
+                        {kokoroState.status === 'loading' && !isKokoroEverActivated() && (
                             <div className="kokoro-progress" aria-live="polite">
                                 <div className="kokoro-progress-bar" role="progressbar"
                                     aria-valuenow={kokoroState.progress}
@@ -329,6 +336,13 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                                         {kokoroState.file}
                                     </div>
                                 )}
+                            </div>
+                        )}
+
+                        {kokoroState.status === 'loading' && isKokoroEverActivated() && (
+                            <div className="kokoro-loading-bg" aria-live="polite">
+                                <Icon name="spinner" spin />
+                                <span>Voice engine loading in background ({kokoroState.progress}%)…</span>
                             </div>
                         )}
 
