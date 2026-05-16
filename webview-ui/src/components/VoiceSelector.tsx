@@ -282,11 +282,10 @@ export function VoiceSelector({ onClose }: VoiceSelectorProps) {
                 ) : (
                     <div className="voice-section">
                         <p className="voice-section-desc">
-                            Kokoro-82M is pre-bundled with the extension and loads automatically
+                            Kokoro-82M is pre-bundled and loads automatically
                             in the background. The first load reads the local model files
-                            (~82 MB ONNX) into memory — subsequent activations are near-instant
-                            thanks to caching. All processing happens on your machine, fully offline.
-                            <p className="voice-section-disclaimer">Speaking is very slow at the moment (takes about 10-25 seconds to process). Still in BETA stage.</p>
+                            (~82 MB ONNX) into memory — subsequent activations are near-instant. All processing happens on your machine, fully offline.
+                            <p className="voice-section-disclaimer">Speaking process is slow at the moment (takes about 10-25 seconds to process). Still in BETA stage.</p>
                         </p>
 
                         {kokoroState.status === 'idle' && !isKokoroEverActivated() && (
