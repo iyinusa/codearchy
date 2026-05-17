@@ -1,7 +1,10 @@
 .vscode/**
 .vscode-test/**
 src/**
-node_modules/**
+# Keep production node_modules so runtime deps (web-tree-sitter) are available.
+# Only exclude directories that are definitely not needed at runtime.
+node_modules/.bin/**
+node_modules/.cache/**
 .gitignore
 .eslintrc.json
 tsconfig.json

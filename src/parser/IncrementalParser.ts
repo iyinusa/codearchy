@@ -3,8 +3,10 @@ import { getLanguageFromExtension } from '../types';
 import * as path from 'path';
 import * as fs from 'fs';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const TreeSitterModule = require('web-tree-sitter');
+// Lazy-load web-tree-sitter so a missing module doesn't crash the extension
+// at activation time — the parser gracefully falls back to regex parsing.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let TreeSitterModule: any = null;
 
 interface ParsedTree {
     rootNode: TreeNode;
@@ -58,10 +60,13 @@ export class IncrementalParser {
 
     private async _initTreeSitter(): Promise<void> {
         try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            TreeSitterModule = require('web-tree-sitter');
             await TreeSitterModule.init();
             this.treeSitterParser = new TreeSitterModule();
             this.treeSitterReady = true;
         } catch {
+            TreeSitterModule = null;
             this.treeSitterReady = false;
         }
     }
